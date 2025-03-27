@@ -1,194 +1,158 @@
-// require('dotenv').config();
-// const express = require('express');
-// const multer = require('multer');
-// const mongoose = require('mongoose');
-// const { ImageAnnotatorClient } = require('@google-cloud/vision');
-// const { Configuration, OpenAIApi ,OpenAI} = require('openai');
-// const cors = require('cors');
-// const session = require('express-session');
-// const MongoStore = require('connect-mongo');
-
-// const app = express();
-// const upload = multer({ dest: 'uploads/' });
-
-// // Middleware
-// app.use(cors());
-// app.use(express.json());
-// app.use(express.static('public'));
-// app.use(session({
-//   secret: process.env.SESSION_SECRET,
-//   resave: false,
-//   saveUninitialized: true,
-//   store: MongoStore.create({ mongoUrl: process.env.MONGODB_URI }),
-// }));
-
-// // MongoDB Setup
-// mongoose.connect(process.env.MONGODB_URI, { useNewUrlParser: true, useUnifiedTopology: true });
-// const ContentSchema = new mongoose.Schema({
-//   sessionId: String,
-//   text: String,
-//   flashcards: [{ question: String, answer: String }],
-//   summary: String,
-// });
-// const Content = mongoose.model('Content', ContentSchema);
-
-// // Google Vision API
-// const visionClient = new ImageAnnotatorClient();
-
-// // OpenAI API
-// //const { OpenAI } = require('openai');
-// const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-
-// // Upload Route
-// app.post('/upload', upload.single('file'), async (req, res) => {
-//   try {
-//     const [visionResult] = await visionClient.textDetection(req.file.path);
-//     const text = visionResult.textAnnotations[0]?.description || 'No text found';
-
-//     const flashcardsResponse = await openai.createCompletion({
-//       model: 'text-davinci-003',
-//       prompt: `Generate 5 flashcards (question and answer pairs) from this text: ${text}`,
-//       max_tokens: 200,
-//     });
-//     const flashcardsText = flashcardsResponse.data.choices[0].text.trim();
-//     const flashcards = flashcardsText.split('\n').map(line => {
-//       const [question, answer] = line.split(' - ');
-//       return { question: question || 'What?', answer: answer || 'Define this' };
-//     }).filter(f => f.question && f.answer);
-
-//     const summaryResponse = await openai.createCompletion({
-//       model: 'text-davinci-003',
-//       prompt: `Summarize this text in 50 words: ${text}`,
-//       max_tokens: 60,
-//     });
-//     const summary = summaryResponse.data.choices[0].text.trim();
-
-//     const content = new Content({ sessionId: req.session.id, text, flashcards, summary });
-//     await content.save();
-//     res.json({ id: content._id });
-//   } catch (error) {
-//     console.error(error);
-//     res.status(500).json({ error: 'Something went wrong!' });
-//   }
-// });
-
-// // Fetch Content
-// app.get('/content', async (req, res) => {
-//   const content = await Content.findOne({ sessionId: req.session.id });
-//   if (!content) return res.status(404).json({ error: 'No content found' });
-//   res.json(content);
-// });
-
-// // Start Server
-// const port = process.env.PORT || 3000;
-// app.listen(port, () => console.log(`Server live on port ${port}`));
-
-// new
+// File: server.js (Updated Backend)
 require('dotenv').config();
 const express = require('express');
 const multer = require('multer');
+const { v4: uuidv4 } = require('uuid');
 const mongoose = require('mongoose');
 const { ImageAnnotatorClient } = require('@google-cloud/vision');
 const { OpenAI } = require('openai');
 const cors = require('cors');
-const session = require('express-session');
-const MongoStore = require('connect-mongo');
+const helmet = require('helmet');
+const rateLimit = require('express-rate-limit');
+const path = require('path');
 
-// MongoDB URI construction
-const username = encodeURIComponent(process.env.DB_USERNAME || '');
-const password = encodeURIComponent(process.env.DB_PASSWORD || '');
-const cluster = process.env.DB_CLUSTER || 'cluster0.9fv5njk.mongodb.net'; // Replace with your cluster
-const dbName = process.env.DB_NAME || 'mydb'; // Replace with your database name
-const authSource = 'admin'; // Default for MongoDB Atlas
-const authMechanism = 'SCRAM-SHA-1'; // Default for MongoDB Atlas
+// Enhanced MongoDB Atlas Connection
+const connectDB = async () => {
+  try {
+    await mongoose.connect(process.env.MONGODB_URI, {
+      useNewUrlParser: true,
+      useUnifiedTopology: true,
+      retryWrites: true,
+      w: 'majority'
+    });
+    console.log('MongoDB Connected with Advanced Configuration');
+  } catch (err) {
+    console.error('Database Connection Error:', err);
+    process.exit(1);
+  }
+};
+connectDB();
 
-// Construct the MongoDB URI
-const mongoUri = process.env.MONGODB_URI || 
-  `mongodb+srv://${username}:${password}@${cluster}/${dbName}?retryWrites=true&w=majority&authSource=${authSource}&authMechanism=${authMechanism}`;
+// AI Clients Configuration
+const visionClient = new ImageAnnotatorClient({
+  credentials: JSON.parse(process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON)
+});
 
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+  timeout: 30000,
+  maxRetries: 3
+});
+
+// Express App Configuration
 const app = express();
-const upload = multer({ dest: 'uploads/' });
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 20 * 1024 * 1024 } // Limit file size to 20MB
+});
 
-// Middleware
-app.use(cors());
-app.use(express.json());
-app.use(express.static('public'));
-app.use(session({
-  secret: process.env.SESSION_SECRET || 'default-secret',
-  resave: false,
-  saveUninitialized: true,
-  store: MongoStore.create({ mongoUrl: mongoUri }),
+// Advanced Security Middleware
+app.use(helmet());
+app.use(cors({
+  origin: process.env.CLIENT_URL,
+  credentials: true
+}));
+app.use(rateLimit({
+  windowMs: 15 * 60 * 1000, // Limit each IP to 100 requests per windowMs
+  max: 100
 }));
 
-// MongoDB Setup with Mongoose
-mongoose.connect(mongoUri, { 
-  useNewUrlParser: true, 
-  useUnifiedTopology: true 
-}).then(() => {
-  console.log('Connected to MongoDB');
-}).catch(err => {
-  console.error('MongoDB connection error:', err);
-});
-
+// Database Schemas
 const ContentSchema = new mongoose.Schema({
-  sessionId: String,
-  text: String,
-  flashcards: [{ question: String, answer: String }],
-  summary: String,
-});
+  sessionId: { type: String, index: true },
+  content: {
+    text: String,
+    flashcards: [{
+      question: String,
+      answer: String,
+      confidence: Number,
+      tags: [String]
+    }],
+    quizzes: [{
+      question: String,
+      options: [String],
+      answer: String,
+      explanation: String
+    }],
+    summary: String,
+    metadata: {
+      pages: Number,
+      languages: [String],
+      processedAt: Date
+    }
+  }
+}, { timestamps: true });
+
 const Content = mongoose.model('Content', ContentSchema);
 
-// Google Vision API
-const visionClient = new ImageAnnotatorClient();
-
-// OpenAI API
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-
-// Upload Route
-app.post('/upload', upload.single('file'), async (req, res) => {
+// Enhanced AI Processing Pipeline
+const processContent = async (buffer, sessionId) => {
   try {
-    const [visionResult] = await visionClient.textDetection(req.file.path);
-    const text = visionResult.textAnnotations[0]?.description || 'No text found';
-
-    const flashcardsResponse = await openai.completions.create({ // Updated method for newer OpenAI API
-      model: 'text-davinci-003',
-      prompt: `Generate 5 flashcards (question and answer pairs) from this text: ${text}`,
-      max_tokens: 200,
+    // Advanced OCR with Google Vision
+    const [ocrResult] = await visionClient.documentTextDetection({
+      image: { content: buffer.toString('base64') }
     });
-    const flashcardsText = flashcardsResponse.choices[0].text.trim();
-    const flashcards = flashcardsText.split('\n').map(line => {
-      const [question, answer] = line.split(' - ');
-      return { question: question || 'What?', answer: answer || 'Define this' };
-    }).filter(f => f.question && f.answer);
 
-    const summaryResponse = await openai.completions.create({ // Updated method
-      model: 'text-davinci-003',
-      prompt: `Summarize this text in 50 words: ${text}`,
-      max_tokens: 60,
+    const fullText = ocrResult.fullTextAnnotation?.text || '';
+    
+    // AI Processing with OpenAI
+    const [summaryResponse, flashcardsResponse, quizzesResponse] = await Promise.all([
+      openai.chat.completions.create({
+        model: 'gpt-4',
+        messages: [{ role: 'user', content: `Summarize this in three paragraphs:\n${fullText}` }]
+      }),
+      openai.chat.completions.create({
+        model: 'gpt-4',
+        messages: [{ role: 'user', content: `Generate flashcards from this text:\n${fullText}` }]
+      }),
+      openai.chat.completions.create({
+        model: 'gpt-4',
+        messages: [{ role: 'user', content: `Create quizzes based on this text:\n${fullText}` }]
+      })
+    ]);
+
+    // Save to Database
+    const contentDoc = new Content({
+      sessionId,
+      content: {
+        text: fullText,
+        flashcards: JSON.parse(flashcardsResponse.choices[0].message.content),
+        quizzes: JSON.parse(quizzesResponse.choices[0].message.content),
+        summary: summaryResponse.choices[0].message.content,
+        metadata: {
+          pages: ocrResult.fullTextAnnotation?.pages?.length || 0,
+          languages: [...new Set(ocrResult.textAnnotations?.map(ta => ta.locale))],
+          processedAt: new Date()
+        }
+      }
     });
-    const summary = summaryResponse.choices[0].text.trim();
 
-    const content = new Content({ sessionId: req.session.id, text, flashcards, summary });
-    await content.save();
-    res.json({ id: content._id });
+    await contentDoc.save();
+    return contentDoc;
   } catch (error) {
-    console.error('Upload error:', error);
-    res.status(500).json({ error: 'Something went wrong!' });
+    console.error('AI Processing Error:', error);
+    throw new Error('Advanced content processing failed');
+  }
+};
+
+// API Endpoints
+app.post('/api/process', upload.single('file'), async (req, res) => {
+  try {
+    const sessionId = uuidv4();
+    const result = await processContent(req.file.buffer, sessionId);
+    res.json({ sessionId, content: result.content });
+  } catch (error) {
+    console.error('Error processing file:', error);
+    res.status(500).json({ error: error.message });
   }
 });
 
-// Fetch Content
-app.get('/content', async (req, res) => {
-  try {
-    const content = await Content.findOne({ sessionId: req.session.id });
-    if (!content) return res.status(404).json({ error: 'No content found' });
-    res.json(content);
-  } catch (error) {
-    console.error('Fetch content error:', error);
-    res.status(500).json({ error: 'Failed to fetch content' });
-  }
+// Serve Frontend
+app.use(express.static(path.join(__dirname, 'client', 'build')));
+app.get('*', (req, res) => {
+  res.sendFile(path.join(__dirname, 'client', 'build', 'index.html'));
 });
 
-// Start Server
-const port = process.env.PORT || 3000;
-app.listen(port, () => console.log(`Server live on port ${port}`));
+// Server Start
+const PORT = process.env.PORT || 5000;
+app.listen(PORT, () => console.log(`Server running on port ${PORT}`));

@@ -110,3 +110,64 @@
   @keyframes trailFade {
     to { opacity: 0; transform: scale(0); }
   }
+
+  /* ADDTIONAL CSS */
+
+  /* File: styles.css (Frontend) */
+:root {
+  --primary: #6366f1;
+  --background: #ffffff;
+  --text: #1f2937;
+  --card-bg: #f8fafc;
+  --transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+[data-theme="dark"] {
+  --background: #0f172a;
+  --text: #f8fafc;
+  --card-bg: #1e293b;
+}
+
+/* Advanced Animations */
+@keyframes float {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-20px); }
+}
+
+.interactive-card {
+  transition: var(--transition);
+  transform-style: preserve-3d;
+  &:hover {
+    transform: rotateY(10deg) rotateX(5deg) scale(1.05);
+    box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.25);
+  }
+}
+
+.ai-response {
+  animation: slideIn 0.5s ease-out;
+}
+
+/* Custom Cursor */
+.cursor {
+  width: 40px;
+  height: 40px;
+  border: 2px solid var(--primary);
+  border-radius: 50%;
+  position: fixed;
+  pointer-events: none;
+  mix-blend-mode: difference;
+  transition: transform 0.3s, opacity 0.3s;
+  z-index: 9999;
+}
+
+/* 3D Flip Animation */
+.flip-card {
+  perspective: 1000px;
+  .flip-card-inner {
+    transition: transform 0.6s;
+    transform-style: preserve-3d;
+  }
+  &.flipped .flip-card-inner {
+    transform: rotateY(180deg);
+  }
+}
