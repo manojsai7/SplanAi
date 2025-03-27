@@ -3,7 +3,7 @@ const express = require('express');
 const multer = require('multer');
 const mongoose = require('mongoose');
 const { ImageAnnotatorClient } = require('@google-cloud/vision');
-const { Configuration, OpenAIApi } = require('openai');
+const { Configuration, OpenAIApi ,OpenAI} = require('openai');
 const cors = require('cors');
 const session = require('express-session');
 const MongoStore = require('connect-mongo');
@@ -36,7 +36,8 @@ const Content = mongoose.model('Content', ContentSchema);
 const visionClient = new ImageAnnotatorClient();
 
 // OpenAI API
-const openai = new OpenAIApi(new Configuration({ apiKey: process.env.OPENAI_API_KEY }));
+//const { OpenAI } = require('openai');
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 // Upload Route
 app.post('/upload', upload.single('file'), async (req, res) => {
