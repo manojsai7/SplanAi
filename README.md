@@ -1,0 +1,2 @@
+# GenBot
+Summarize, Quiz, FlashCards 
