@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>StudyX 🚀</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>StudyX</h1>
+      <button id="theme-toggle">🌙</button>
+    </header>
+    <main id="home" class="page active">
+      <div class="rocket">🚀</div>
+      <h2>Blast Off Your Studies!</h2>
+      <p>Upload your notes and let AI do the heavy lifting.</p>
+      <input type="file" id="file-input">
+      <button id="upload-btn">Launch!</button>
+    </main>
+    <main id="chat" class="page">
+      <div class="chat-window">
+        <div id="messages"></div>
+        <div class="actions">
+          <button id="flashcards-btn">Flashcards</button>
+          <button id="summary-btn">Summary</button>
+          <button id="quiz-btn">Quiz</button>
+        </div>
+      </div>
+    </main>
+    <nav>
+      <button data-page="home">Home</button>
+      <button data-page="chat">Chat</button>
+    </nav>
+  </div>
+  <script src="script.js"></script>
+</body>
+</html>
