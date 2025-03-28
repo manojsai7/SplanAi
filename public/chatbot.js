@@ -246,25 +246,31 @@ document.addEventListener('DOMContentLoaded', function() {
                 })
             });
             
+            // Hide typing indicator
+            hideTypingIndicator();
+            
             if (!response.ok) {
                 const errorData = await response.json();
-                throw new Error(errorData.message || errorData.error || 'Network response was not ok');
+                // Use the reply field from the error response if available
+                if (errorData && errorData.reply) {
+                    addBotMessage(errorData.reply);
+                } else {
+                    throw new Error(errorData.message || errorData.error || 'Network response was not ok');
+                }
+                return;
             }
             
             const data = await response.json();
             
-            // Hide typing indicator
-            hideTypingIndicator();
-            
-            // Display bot response
-            addBotMessage(data.reply || data.message || "I'm not sure how to respond to that.");
+            // Display bot response - use the reply field which is now guaranteed to exist
+            addBotMessage(data.reply || "I'm not sure how to respond to that.");
             
             // Check for suggested actions
-            checkForSuggestedActions(data.reply || data.message || "");
+            checkForSuggestedActions(data.reply || "");
         } catch (error) {
             console.error('Error:', error);
             
-            // Hide typing indicator
+            // Hide typing indicator if still showing
             hideTypingIndicator();
             
             // Display error message

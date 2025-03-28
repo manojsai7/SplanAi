@@ -118,11 +118,8 @@ const connectDB = async () => {
     
     // 4. MongoDB Connection Options - carefully configured for Heroku + MongoDB Atlas
     const options = {
-      useNewUrlParser: true,
-      useUnifiedTopology: true,
       ssl: true,
       tls: true,
-      tlsInsecure: process.env.NODE_ENV === 'production', // Only bypass in production (Heroku)
       retryWrites: true,
       w: "majority",
       maxPoolSize: 10,
@@ -420,59 +417,58 @@ const auth = async (req, res, next) => {
     const connection = await connectDB();
     const connected = !!connection;
     
-    if (connected) {
-      console.log('✅ Initializing MongoDB models...');
-      // Create models only after connection is established
-      User = mongoose.model('User', UserSchema);
-      Content = mongoose.model('Content', ContentSchema);
-      ChatHistory = mongoose.model('ChatHistory', ChatHistorySchema);
-      console.log('✅ MongoDB models initialized successfully');
+    if (!connected) {
+      console.error("❌ Failed to connect to MongoDB. Starting server anyway, but database features will be unavailable.");
+    }
+    
+    // Define MongoDB models
+    console.log("✅ Initializing MongoDB models...");
+    
+    // Initialize models regardless of connection status to avoid undefined errors
+    User = mongoose.model('User', UserSchema);
+    Content = mongoose.model('Content', ContentSchema);
+    ChatHistory = mongoose.model('ChatHistory', ChatHistorySchema);
+    
+    console.log("✅ MongoDB models initialized successfully");
+    
+    // Configure session store with MongoDB if connected
+    try {
+      // Get the encoded MongoDB URI
+      let uri = process.env.MONGODB_URI;
       
-      // Configure session store with MongoDB if connected
-      try {
-        // Get the encoded MongoDB URI
-        let uri = process.env.MONGODB_URI;
-        
-        // Encode password
-        uri = uri.replace(/(mongodb\+srv:\/\/[^:]+):([^@]+)@/, (match, username, password) => {
-          return `${username}:${encodeURIComponent(password)}@`;
-        });
-        
-        // Add SSL parameters if needed
-        if (!uri.includes("ssl=")) uri += (uri.includes("?") ? "&" : "?") + "ssl=true";
-        if (!uri.includes("tls=")) uri += "&tls=true";
-        
-        console.log('🔄 Setting up MongoDB session store');
-        
-        sessionConfig.store = MongoStore.create({
-          mongoUrl: uri,
-          ttl: 14 * 24 * 60 * 60, // 14 days
-          autoRemove: 'native',
-          touchAfter: 24 * 3600, // 24 hours
-          collectionName: 'sessions',
-          crypto: {
-            secret: process.env.SESSION_SECRET || 'fallback_session_secret'
-          },
-          mongoOptions: {
-            useNewUrlParser: true,
-            useUnifiedTopology: true,
-            ssl: true,
-            tls: true,
-            tlsInsecure: true
-          }
-        });
-        
-        console.log('✅ MongoDB session store configured');
-      } catch (sessionErr) {
-        console.error('❌ Error initializing MongoStore:', sessionErr.message);
-        console.log('⚠️ Falling back to in-memory session store');
-      }
-    } else {
-      console.warn('⚠️ MongoDB not connected, initializing models with limited functionality');
-      // Create models to avoid errors, but they won't work without DB connection
-      User = mongoose.model('User', UserSchema);
-      Content = mongoose.model('Content', ContentSchema);
-      ChatHistory = mongoose.model('ChatHistory', ChatHistorySchema);
+      // Encode password
+      uri = uri.replace(/(mongodb\+srv:\/\/[^:]+):([^@]+)@/, (match, username, password) => {
+        return `${username}:${encodeURIComponent(password)}@`;
+      });
+      
+      // Add SSL parameters if needed
+      if (!uri.includes("ssl=")) uri += (uri.includes("?") ? "&" : "?") + "ssl=true";
+      if (!uri.includes("tls=")) uri += "&tls=true";
+      
+      console.log('🔄 Setting up MongoDB session store');
+      
+      sessionConfig.store = MongoStore.create({
+        mongoUrl: uri,
+        ttl: 14 * 24 * 60 * 60, // 14 days
+        autoRemove: 'native',
+        touchAfter: 24 * 3600, // 24 hours
+        collectionName: 'sessions',
+        crypto: {
+          secret: process.env.SESSION_SECRET || 'fallback_session_secret'
+        },
+        mongoOptions: {
+          useNewUrlParser: true,
+          useUnifiedTopology: true,
+          ssl: true,
+          tls: true,
+          tlsInsecure: true
+        }
+      });
+      
+      console.log('✅ MongoDB session store configured');
+    } catch (sessionErr) {
+      console.error('❌ Error initializing MongoStore:', sessionErr.message);
+      console.log('⚠️ Falling back to in-memory session store');
     }
     
     // Express App Configuration
@@ -992,10 +988,7 @@ const auth = async (req, res, next) => {
         // Check if MongoDB is connected
         if (mongoose.connection.readyState !== 1) {
           console.warn('⚠️ Chatbot request attempted before MongoDB connection is ready');
-          return res.status(503).json({ 
-            error: 'Database connection not ready',
-            message: 'The server database is currently connecting. Please try again in a moment.'
-          });
+          // Continue anyway - we can still process the request without DB
         }
         
         // Extract data from request
@@ -1003,7 +996,10 @@ const auth = async (req, res, next) => {
         
         // Validate message
         if (!message || typeof message !== 'string' || message.trim().length === 0) {
-          return res.status(400).json({ error: 'Message is required' });
+          return res.status(400).json({ 
+            error: 'Message is required',
+            reply: 'I need a message to respond to. Please try again.'
+          });
         }
         
         // Generate a unique session ID if not provided
@@ -1022,7 +1018,7 @@ const auth = async (req, res, next) => {
           let contentContext = '';
           let title = '';
           
-          if (sessionId) {
+          if (sessionId && mongoose.connection.readyState === 1) {
             try {
               const content = await Content.findOne({ sessionId });
               if (content) {
@@ -1064,79 +1060,90 @@ const auth = async (req, res, next) => {
           // Add current message to chat history
           chatHistory.push({ role: 'user', parts: [{ text: message }] });
           
-          // Create chat session
-          const chat = model.startChat({
-            history: chatHistory,
-            generationConfig: {
-              temperature: 0.7,
-              topP: 0.8,
-              topK: 40,
-              maxOutputTokens: 1024,
-            },
-          });
-          
-          // Generate response
-          console.log('⏳ Generating chatbot response...');
-          const result = await chat.sendMessage(message);
-          const response = result.response;
-          const responseText = response.text();
-          
-          console.log(`✅ Chatbot response generated (${responseText.length} characters)`);
-          
-          // Save chat history to database if user is authenticated
-          if (userId) {
-            try {
-              // Find existing chat or create new one
-              let chatSession = await Chat.findOne({ sessionId, userId });
-              
-              if (!chatSession) {
-                chatSession = new Chat({
-                  sessionId,
-                  userId,
-                  title: title || 'Chat Session',
-                  history: []
-                });
+          try {
+            // Create chat session
+            const chat = model.startChat({
+              history: chatHistory,
+              generationConfig: {
+                temperature: 0.7,
+                topP: 0.8,
+                topK: 40,
+                maxOutputTokens: 1024,
+              },
+            });
+            
+            // Generate response
+            console.log('⏳ Generating chatbot response...');
+            const result = await chat.sendMessage(message);
+            const response = result.response;
+            const responseText = response.text();
+            
+            console.log(`✅ Chatbot response generated (${responseText.length} characters)`);
+            
+            // Save chat history to database if user is authenticated and DB is connected
+            if (userId && mongoose.connection.readyState === 1) {
+              try {
+                // Find existing chat or create new one
+                let chatSession = await ChatHistory.findOne({ sessionId, userId });
+                
+                if (!chatSession) {
+                  chatSession = new ChatHistory({
+                    sessionId,
+                    userId,
+                    title: title || 'Chat Session',
+                    history: []
+                  });
+                }
+                
+                // Add new messages to history
+                chatSession.history.push({ role: 'user', content: message });
+                chatSession.history.push({ role: 'assistant', content: responseText });
+                
+                // Update last activity
+                chatSession.lastActivity = new Date();
+                
+                // Save chat session
+                await chatSession.save();
+                console.log('✅ Chat history saved to database');
+              } catch (chatSaveError) {
+                console.error('❌ Error saving chat history:', chatSaveError);
+                // Continue without saving chat history
               }
-              
-              // Add new messages to history
-              chatSession.history.push({ role: 'user', content: message });
-              chatSession.history.push({ role: 'assistant', content: responseText });
-              
-              // Update last activity
-              chatSession.lastActivity = new Date();
-              
-              // Save chat session
-              await chatSession.save();
-              console.log('✅ Chat history saved to database');
-            } catch (chatSaveError) {
-              console.error('❌ Error saving chat history:', chatSaveError);
-              // Continue without saving chat history
             }
+            
+            // Return the response
+            return res.status(200).json({
+              message: 'Chatbot response generated successfully',
+              sessionId,
+              reply: responseText
+            });
+          } catch (aiError) {
+            console.error('❌ Chatbot AI Error:', aiError);
+            return res.status(500).json({ 
+              error: 'Chatbot processing failed', 
+              message: `Could not generate a response: ${aiError.message}`,
+              reply: "I'm sorry, I encountered an error while processing your request. Please try again with a different question.",
+              sessionId 
+            });
           }
-          
-          // Return the response
-          return res.status(200).json({
-            message: 'Chatbot response generated successfully',
-            sessionId,
-            response: responseText
-          });
-        } catch (aiError) {
-          console.error('❌ Chatbot AI Error:', aiError);
+        } catch (error) {
+          console.error('❌ Chatbot Error:', error);
           return res.status(500).json({ 
-            error: 'Chatbot processing failed', 
-            message: `Could not generate a response: ${aiError.message}`,
-            sessionId 
+            error: 'Chatbot request failed', 
+            message: error.message,
+            reply: "I'm sorry, I'm having trouble processing your request right now. Please try again later."
           });
         }
-      } catch (error) {
-        console.error('❌ Chatbot Error:', error);
-        return res.status(500).json({ 
-          error: 'Chatbot request failed', 
-          message: error.message 
+      } catch (outerError) {
+        console.error('❌ Fatal Chatbot Error:', outerError);
+        return res.status(500).json({
+          error: 'Fatal chatbot error',
+          message: outerError.message,
+          reply: "I apologize, but I'm experiencing technical difficulties. Please try again later."
         });
       }
     });
-
+    
     // Catch-all route for SPA in production
     if (process.env.NODE_ENV === 'production') {
       app.get('*', (req, res) => {
@@ -2048,10 +2055,7 @@ app.post('/api/chatbot', async (req, res) => {
     // Check if MongoDB is connected
     if (mongoose.connection.readyState !== 1) {
       console.warn('⚠️ Chatbot request attempted before MongoDB connection is ready');
-      return res.status(503).json({ 
-        error: 'Database connection not ready',
-        message: 'The server database is currently connecting. Please try again in a moment.'
-      });
+      // Continue anyway - we can still process the request without DB
     }
     
     // Extract data from request
@@ -2059,7 +2063,10 @@ app.post('/api/chatbot', async (req, res) => {
     
     // Validate message
     if (!message || typeof message !== 'string' || message.trim().length === 0) {
-      return res.status(400).json({ error: 'Message is required' });
+      return res.status(400).json({ 
+        error: 'Message is required',
+        reply: 'I need a message to respond to. Please try again.'
+      });
     }
     
     // Generate a unique session ID if not provided
@@ -2078,7 +2085,7 @@ app.post('/api/chatbot', async (req, res) => {
       let contentContext = '';
       let title = '';
       
-      if (sessionId) {
+      if (sessionId && mongoose.connection.readyState === 1) {
         try {
           const content = await Content.findOne({ sessionId });
           if (content) {
@@ -2120,75 +2127,86 @@ app.post('/api/chatbot', async (req, res) => {
       // Add current message to chat history
       chatHistory.push({ role: 'user', parts: [{ text: message }] });
       
-      // Create chat session
-      const chat = model.startChat({
-        history: chatHistory,
-        generationConfig: {
-          temperature: 0.7,
-          topP: 0.8,
-          topK: 40,
-          maxOutputTokens: 1024,
-        },
-      });
-      
-      // Generate response
-      console.log('⏳ Generating chatbot response...');
-      const result = await chat.sendMessage(message);
-      const response = result.response;
-      const responseText = response.text();
-      
-      console.log(`✅ Chatbot response generated (${responseText.length} characters)`);
-      
-      // Save chat history to database if user is authenticated
-      if (userId) {
-        try {
-          // Find existing chat or create new one
-          let chatSession = await Chat.findOne({ sessionId, userId });
-          
-          if (!chatSession) {
-            chatSession = new Chat({
-              sessionId,
-              userId,
-              title: title || 'Chat Session',
-              history: []
-            });
+      try {
+        // Create chat session
+        const chat = model.startChat({
+          history: chatHistory,
+          generationConfig: {
+            temperature: 0.7,
+            topP: 0.8,
+            topK: 40,
+            maxOutputTokens: 1024,
+          },
+        });
+        
+        // Generate response
+        console.log('⏳ Generating chatbot response...');
+        const result = await chat.sendMessage(message);
+        const response = result.response;
+        const responseText = response.text();
+        
+        console.log(`✅ Chatbot response generated (${responseText.length} characters)`);
+        
+        // Save chat history to database if user is authenticated and DB is connected
+        if (userId && mongoose.connection.readyState === 1) {
+          try {
+            // Find existing chat or create new one
+            let chatSession = await ChatHistory.findOne({ sessionId, userId });
+            
+            if (!chatSession) {
+              chatSession = new ChatHistory({
+                sessionId,
+                userId,
+                title: title || 'Chat Session',
+                history: []
+              });
+            }
+            
+            // Add new messages to history
+            chatSession.history.push({ role: 'user', content: message });
+            chatSession.history.push({ role: 'assistant', content: responseText });
+            
+            // Update last activity
+            chatSession.lastActivity = new Date();
+            
+            // Save chat session
+            await chatSession.save();
+            console.log('✅ Chat history saved to database');
+          } catch (chatSaveError) {
+            console.error('❌ Error saving chat history:', chatSaveError);
+            // Continue without saving chat history
           }
-          
-          // Add new messages to history
-          chatSession.history.push({ role: 'user', content: message });
-          chatSession.history.push({ role: 'assistant', content: responseText });
-          
-          // Update last activity
-          chatSession.lastActivity = new Date();
-          
-          // Save chat session
-          await chatSession.save();
-          console.log('✅ Chat history saved to database');
-        } catch (chatSaveError) {
-          console.error('❌ Error saving chat history:', chatSaveError);
-          // Continue without saving chat history
         }
+        
+        // Return the response
+        return res.status(200).json({
+          message: 'Chatbot response generated successfully',
+          sessionId,
+          reply: responseText
+        });
+      } catch (aiError) {
+        console.error('❌ Chatbot AI Error:', aiError);
+        return res.status(500).json({ 
+          error: 'Chatbot processing failed', 
+          message: `Could not generate a response: ${aiError.message}`,
+          reply: "I'm sorry, I encountered an error while processing your request. Please try again with a different question.",
+          sessionId 
+        });
       }
-      
-      // Return the response
-      return res.status(200).json({
-        message: 'Chatbot response generated successfully',
-        sessionId,
-        response: responseText
-      });
-    } catch (aiError) {
-      console.error('❌ Chatbot AI Error:', aiError);
+    } catch (error) {
+      console.error('❌ Chatbot Error:', error);
       return res.status(500).json({ 
-        error: 'Chatbot processing failed', 
-        message: `Could not generate a response: ${aiError.message}`,
-        sessionId 
+        error: 'Chatbot request failed', 
+        message: error.message,
+        reply: "I'm sorry, I'm having trouble processing your request right now. Please try again later."
       });
     }
-  } catch (error) {
-    console.error('❌ Chatbot Error:', error);
-    return res.status(500).json({ 
-      error: 'Chatbot request failed', 
-      message: error.message 
+  } catch (outerError) {
+    console.error('❌ Fatal Chatbot Error:', outerError);
+    return res.status(500).json({
+      error: 'Fatal chatbot error',
+      message: outerError.message,
+      reply: "I apologize, but I'm experiencing technical difficulties. Please try again later."
     });
   }
 });
