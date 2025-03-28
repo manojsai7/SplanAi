@@ -5,7 +5,7 @@ const multer = require('multer');
 const { v4: uuidv4 } = require('uuid');
 const mongoose = require('mongoose');
 const { ImageAnnotatorClient } = require('@google-cloud/vision');
-const { OpenAI } = require('openai');
+const { GoogleGenerativeAI } = require('@google/generative-ai');
 const cors = require('cors');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
@@ -59,6 +59,10 @@ const connectDB = async () => {
     
     console.log(" Connecting to MongoDB Atlas...");
 
+    // Connect to MongoDB with options that prevent buffering errors
+    mongoose.set('bufferCommands', false); // Disable buffering to prevent waiting for connection
+    mongoose.set('autoIndex', false);  // Don't build indexes automatically
+    
     // 4. MongoDB Connection Options - carefully configured for Heroku + MongoDB Atlas
     const options = {
       useNewUrlParser: true,
@@ -71,7 +75,9 @@ const connectDB = async () => {
       maxPoolSize: 10,
       serverSelectionTimeoutMS: 30000,
       connectTimeoutMS: 30000,
-      socketTimeoutMS: 45000
+      socketTimeoutMS: 45000,
+      bufferCommands: false, // Disable command buffering
+      autoIndex: false // Don't build indexes automatically
     };
 
     // 5. Connect to MongoDB
@@ -99,21 +105,152 @@ const connectDB = async () => {
 // Call connectDB but don't exit on failure
 const dbPromise = connectDB();
 
-// Session Configuration with proper MongoDB URI handling
-const sessionConfig = {
-  secret: process.env.SESSION_SECRET || 'fallback_session_secret',
-  resave: false,
-  saveUninitialized: false,
-  cookie: {
-    secure: process.env.NODE_ENV === 'production',
-    httpOnly: true,
-    maxAge: 7 * 24 * 60 * 60 * 1000 // 7 days
+// Define Mongoose schemas
+// User Schema
+const UserSchema = new mongoose.Schema({
+  username: {
+    type: String,
+    required: true,
+    unique: true,
+    trim: true,
+    minlength: 3,
+    maxlength: 50
+  },
+  email: {
+    type: String,
+    required: true,
+    unique: true,
+    trim: true,
+    lowercase: true,
+    match: [/.+\@.+\..+/, 'Please fill a valid email address']
+  },
+  password: {
+    type: String,
+    required: true,
+    minlength: 6,
+    maxlength: 1024, // For hashed password
+    select: false // Don't send password in normal queries
+  },
+  role: {
+    type: String,
+    enum: ['user', 'admin'],
+    default: 'user'
+  },
+  createdAt: {
+    type: Date,
+    default: Date.now
+  },
+  lastLogin: {
+    type: Date
   }
-};
+}, { timestamps: true });
 
-// Wait for database connection before starting server
+// Content Schema with user reference
+const ContentSchema = new mongoose.Schema({
+  sessionId: { type: String, index: true },
+  userId: { 
+    type: mongoose.Schema.Types.ObjectId, 
+    ref: 'User',
+    index: true
+  },
+  title: {
+    type: String,
+    default: "Untitled Document"
+  },
+  content: {
+    text: String,
+    flashcards: [{
+      question: String,
+      answer: String,
+      confidence: Number,
+      tags: [String]
+    }],
+    quizzes: [{
+      question: String,
+      options: [String],
+      answer: String,
+      explanation: String
+    }],
+    summary: String,
+    metadata: {
+      pages: Number,
+      languages: [String],
+      processedAt: Date,
+      contentType: String, // 'text', 'image', 'pdf'
+      source: String // 'upload', 'direct-input'
+    }
+  }
+}, { timestamps: true });
+
+// Chat History Schema
+const ChatHistorySchema = new mongoose.Schema({
+  sessionId: {
+    type: String,
+    required: true,
+    index: true
+  },
+  userId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User'
+  },
+  messages: [{
+    role: {
+      type: String,
+      enum: ['user', 'assistant', 'system'],
+      required: true
+    },
+    content: {
+      type: String,
+      required: true
+    },
+    timestamp: {
+      type: Date,
+      default: Date.now
+    }
+  }],
+  createdAt: {
+    type: Date,
+    default: Date.now
+  },
+  updatedAt: {
+    type: Date,
+    default: Date.now
+  }
+});
+
+// Initialize models only after successful connection
+let User, Content, ChatHistory;
+
+// Wait for mongoose connection before initializing models
 dbPromise.then(connected => {
-  // Set up MongoStore for session if MongoDB is connected
+  if (connected) {
+    console.log('Initializing MongoDB models...');
+    // Create models only after connection is established
+    User = mongoose.model('User', UserSchema);
+    Content = mongoose.model('Content', ContentSchema);
+    ChatHistory = mongoose.model('ChatHistory', ChatHistorySchema);
+    console.log('MongoDB models initialized successfully');
+  } else {
+    console.warn(' MongoDB not connected, some features will be limited');
+    // Create models to avoid errors, but they won't work without DB connection
+    User = mongoose.model('User', UserSchema);
+    Content = mongoose.model('Content', ContentSchema);
+    ChatHistory = mongoose.model('ChatHistory', ChatHistorySchema);
+  }
+
+  // Session Configuration with proper MongoDB URI handling
+  const sessionConfig = {
+    secret: process.env.SESSION_SECRET || 'fallback_session_secret',
+    resave: false,
+    saveUninitialized: false,
+    cookie: {
+      secure: process.env.NODE_ENV === 'production',
+      httpOnly: true,
+      maxAge: 7 * 24 * 60 * 60 * 1000 // 7 days
+    }
+  };
+
+  // Wait for database connection before starting server
   if (connected && process.env.MONGODB_URI) {
     try {
       // Get the encoded MongoDB URI
@@ -159,6 +296,9 @@ dbPromise.then(connected => {
     console.log(` Server running on port ${PORT} in ${process.env.NODE_ENV || 'development'} mode`);
   });
 });
+
+// Initialize the Google Generative AI client
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
 // AI Clients Configuration
 let visionClient;
@@ -313,13 +453,6 @@ function createMockVisionClient() {
   };
 }
 
-// Initialize OpenAI API client
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-  timeout: 30000,
-  maxRetries: 3
-});
-
 // Express App Configuration
 app.use(express.json()); // Support for JSON payloads
 const upload = multer({
@@ -331,123 +464,6 @@ const upload = multer({
 app.get('/health', (req, res) => {
   res.status(200).json({ status: 'ok', timestamp: new Date().toISOString() });
 });
-
-// Database Schemas
-// User Schema
-const UserSchema = new mongoose.Schema({
-  username: {
-    type: String,
-    required: true,
-    unique: true,
-    trim: true,
-    minlength: 3,
-    maxlength: 50
-  },
-  email: {
-    type: String,
-    required: true,
-    unique: true,
-    trim: true,
-    lowercase: true,
-    match: [/.+\@.+\..+/, 'Please fill a valid email address']
-  },
-  password: {
-    type: String,
-    required: true,
-    minlength: 6,
-    maxlength: 1024, // For hashed password
-    select: false // Don't send password in normal queries
-  },
-  role: {
-    type: String,
-    enum: ['user', 'admin'],
-    default: 'user'
-  },
-  createdAt: {
-    type: Date,
-    default: Date.now
-  },
-  lastLogin: {
-    type: Date
-  }
-}, { timestamps: true });
-
-// Content Schema with user reference
-const ContentSchema = new mongoose.Schema({
-  sessionId: { type: String, index: true },
-  userId: { 
-    type: mongoose.Schema.Types.ObjectId, 
-    ref: 'User',
-    index: true
-  },
-  title: {
-    type: String,
-    default: "Untitled Document"
-  },
-  content: {
-    text: String,
-    flashcards: [{
-      question: String,
-      answer: String,
-      confidence: Number,
-      tags: [String]
-    }],
-    quizzes: [{
-      question: String,
-      options: [String],
-      answer: String,
-      explanation: String
-    }],
-    summary: String,
-    metadata: {
-      pages: Number,
-      languages: [String],
-      processedAt: Date,
-      contentType: String, // 'text', 'image', 'pdf'
-      source: String // 'upload', 'direct-input'
-    }
-  }
-}, { timestamps: true });
-
-// Chat History Schema
-const ChatHistorySchema = new mongoose.Schema({
-  sessionId: {
-    type: String,
-    required: true,
-    index: true
-  },
-  userId: {
-    type: mongoose.Schema.Types.ObjectId,
-    ref: 'User'
-  },
-  messages: [{
-    role: {
-      type: String,
-      enum: ['user', 'assistant', 'system'],
-      required: true
-    },
-    content: {
-      type: String,
-      required: true
-    },
-    timestamp: {
-      type: Date,
-      default: Date.now
-    }
-  }],
-  createdAt: {
-    type: Date,
-    default: Date.now
-  },
-  updatedAt: {
-    type: Date,
-    default: Date.now
-  }
-});
-
-const User = mongoose.model('User', UserSchema);
-const Content = mongoose.model('Content', ContentSchema);
-const ChatHistory = mongoose.model('ChatHistory', ChatHistorySchema);
 
 // Authentication middleware
 const auth = async (req, res, next) => {
@@ -494,81 +510,68 @@ const processTextContent = async (text, sessionId, metadata = {}, userId = null)
     
     const fullText = text.trim();
     
-    // AI Processing with OpenAI
-    console.log('Processing with OpenAI, text length:', fullText.length);
-    
-    // Use gpt-3.5-turbo model instead of gpt-4 for better compatibility
-    const MODEL = 'gpt-3.5-turbo';
+    // AI Processing with Google Generative AI
+    console.log('Processing with Google Generative AI, text length:', fullText.length);
     
     try {
-      const [summaryResponse, flashcardsResponse, quizzesResponse] = await Promise.all([
-        openai.chat.completions.create({
-          model: MODEL,
-          messages: [{ role: 'user', content: `Summarize this in three paragraphs:\n${fullText}` }],
-          temperature: 0.7,
-          max_tokens: 500
-        }),
-        openai.chat.completions.create({
-          model: MODEL,
-          messages: [{ 
-            role: 'user', 
-            content: `Generate 5 flashcards from this text in the following JSON format:
-            [
-              {
-                "question": "Question here?",
-                "answer": "Answer here",
-                "confidence": 0.9,
-                "tags": ["tag1", "tag2"]
-              }
-            ]
-            Text: ${fullText}` 
-          }],
-          temperature: 0.7,
-          response_format: { type: "json_object" },
-          max_tokens: 1000
-        }),
-        openai.chat.completions.create({
-          model: MODEL,
-          messages: [{ 
-            role: 'user', 
-            content: `Generate 3 multiple-choice questions with answers from this text in the following format:
-            [
-              {
-                "question": "Question text here?",
-                "options": ["Option A", "Option B", "Option C", "Option D"],
-                "answer": "Option A",
-                "explanation": "Brief explanation here"
-              }
-            ]
-            Text: ${fullText}` 
-          }],
-          temperature: 0.7,
-          response_format: { type: "json_object" },
-          max_tokens: 1000
-        }),
-      ]);
+      // Get the Gemini Pro model
+      const model = genAI.getGenerativeModel({ model: "gemini-pro" });
       
-      console.log('✅ AI processing completed successfully');
+      // Process content in parallel with Gemini
+      console.log('Starting Gemini processing...');
       
-      // Extract content from responses
-      const summary = summaryResponse.choices[0]?.message?.content?.trim() || '';
+      // Generate summary
+      const summaryPrompt = `Summarize this in three paragraphs:\n${fullText}`;
+      const summaryResult = await model.generateContent(summaryPrompt);
+      const summary = summaryResult.response.text();
+      
+      // Generate flashcards
+      const flashcardsPrompt = `Generate 5 flashcards from this text in the following JSON format:
+      [
+        {
+          "question": "Question here?",
+          "answer": "Answer here",
+          "confidence": 0.9,
+          "tags": ["tag1", "tag2"]
+        }
+      ]
+      Text: ${fullText}`;
+      
+      const flashcardsResult = await model.generateContent(flashcardsPrompt);
+      const flashcardsText = flashcardsResult.response.text();
+      
+      // Generate quizzes
+      const quizzesPrompt = `Generate 3 multiple-choice questions with answers from this text in the following format:
+      [
+        {
+          "question": "Question text here?",
+          "options": ["Option A", "Option B", "Option C", "Option D"],
+          "answer": "Option A",
+          "explanation": "Brief explanation here"
+        }
+      ]
+      Text: ${fullText}`;
+      
+      const quizzesResult = await model.generateContent(quizzesPrompt);
+      const quizzesText = quizzesResult.response.text();
+      
+      console.log(' AI processing completed successfully');
+      
+      // Parse JSON responses with error handling
       let flashcards = [];
       let quizzes = [];
       
       try {
         // Parse JSON responses with error handling
-        const flashcardsContent = flashcardsResponse.choices[0]?.message?.content?.trim() || '[]';
-        flashcards = JSON.parse(extractJSONFromString(flashcardsContent));
-        
-        const quizzesContent = quizzesResponse.choices[0]?.message?.content?.trim() || '[]';
-        quizzes = JSON.parse(extractJSONFromString(quizzesContent));
+        flashcards = JSON.parse(extractJSONFromString(flashcardsText));
+        quizzes = JSON.parse(extractJSONFromString(quizzesText));
       } catch (jsonError) {
         console.error('Error parsing AI response JSON:', jsonError);
         // Create fallback content if parsing fails
-        if (flashcards.length === 0) {
+        if (!Array.isArray(flashcards) || flashcards.length === 0) {
           flashcards = [{ question: "What is this text about?", answer: "Unable to generate specific flashcards", confidence: 0.5, tags: ["general"] }];
         }
-        if (quizzes.length === 0) {
+        if (!Array.isArray(quizzes) || quizzes.length === 0) {
           quizzes = [{ 
             question: "What is the main topic discussed?", 
             options: ["Topic A", "Topic B", "Topic C", "Cannot determine"], 
@@ -583,17 +586,9 @@ const processTextContent = async (text, sessionId, metadata = {}, userId = null)
       
       if (!title) {
         try {
-          const titleResponse = await openai.chat.completions.create({
-            model: MODEL,
-            messages: [{ 
-              role: 'user', 
-              content: `Create a very short title (5-7 words max) for this text:\n${fullText.substring(0, 1000)}...` 
-            }],
-            temperature: 0.7,
-            max_tokens: 50
-          });
-          
-          title = titleResponse.choices[0]?.message?.content?.trim() || 'Untitled Document';
+          const titlePrompt = `Create a very short title (5-7 words max) for this text:\n${fullText.substring(0, 1000)}...`;
+          const titleResult = await model.generateContent(titlePrompt);
+          title = titleResult.response.text().trim() || 'Untitled Document';
         } catch (titleError) {
           console.error('Error generating title:', titleError);
           title = 'Untitled Document';
@@ -702,7 +697,7 @@ app.use(helmet({
   contentSecurityPolicy: {
     directives: {
       defaultSrc: ["'self'"],
-      connectSrc: ["'self'", 'https://*.openai.com'],
+      connectSrc: ["'self'", 'https://*.googleapis.com'],
       scriptSrc: ["'self'", "'unsafe-inline'"],
       styleSrc: ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com', 'https://cdnjs.cloudflare.com'],
       fontSrc: ["'self'", 'https://fonts.gstatic.com', 'https://cdnjs.cloudflare.com'],
@@ -1115,25 +1110,48 @@ app.post('/api/chatbot', async (req, res) => {
       return res.status(400).json({ error: 'Message is required' });
     }
     
-    // Use gpt-3.5-turbo for chatbot functionality
-    const response = await openai.chat.completions.create({
-      model: 'gpt-3.5-turbo',
-      messages: [
+    // Use Gemini model for chatbot functionality
+    const model = genAI.getGenerativeModel({ model: "gemini-pro" });
+    
+    // Prepare chat history if available
+    let chatHistory = [];
+    if (sessionId && mongoose.connection.readyState === 1) {
+      try {
+        const history = await ChatHistory.findOne({ sessionId });
+        if (history && history.messages) {
+          // Convert to format Gemini can use
+          chatHistory = history.messages.map(msg => ({
+            role: msg.role === 'assistant' ? 'model' : 'user',
+            parts: [{ text: msg.content }]
+          }));
+        }
+      } catch (historyError) {
+        console.error('Error retrieving chat history:', historyError);
+      }
+    }
+    
+    // Create the Gemini chat
+    const chat = model.startChat({
+      history: chatHistory.length > 0 ? chatHistory : [
         {
-          role: 'system',
-          content: `You are a helpful study assistant for SplanAI, an app that helps students learn from their notes, documents, and images.
+          role: "model",
+          parts: [{ 
+            text: `I am a helpful study assistant for SplanAI, an app that helps students learn from their notes, documents, and images.
             SplanAI can create summaries, flashcards, and quizzes from uploaded content.
-            Be friendly, concise, and helpful. If you don't know something, suggest using the app's features instead.
-            Keep responses under 150 words to fit nicely in the chat interface.`
-        },
-        { role: 'user', content: message }
+            I'll be friendly, concise, and helpful. If I don't know something, I'll suggest using the app's features instead.
+            I'll keep responses under 150 words to fit nicely in the chat interface.`
+          }]
+        }
       ],
-      temperature: 0.7,
-      max_tokens: 300
+      generationConfig: {
+        temperature: 0.7,
+        maxOutputTokens: 300
+      }
     });
     
-    const reply = response.choices[0]?.message?.content?.trim() || 
-      "I'm sorry, I couldn't process your request. Please try again.";
+    // Send the message and get a response
+    const result = await chat.sendMessage(message);
+    const reply = result.response.text();
     
     // Save chat history if connected to database and sessionId provided
     if (mongoose.connection.readyState === 1 && sessionId) {
