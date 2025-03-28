@@ -300,6 +300,12 @@ document.addEventListener('DOMContentLoaded', function() {
     const formData = new FormData();
     formData.append('file', file);
     
+    // Generate a session ID if not already set
+    if (!currentSessionId) {
+      currentSessionId = Date.now().toString() + Math.random().toString(36).substring(2, 8);
+    }
+    formData.append('sessionId', currentSessionId);
+    
     // Add user ID if logged in
     if (currentUser) {
       formData.append('userId', currentUser.id);
@@ -315,7 +321,7 @@ document.addEventListener('DOMContentLoaded', function() {
         headers['Authorization'] = `Bearer ${authToken}`;
       }
       
-      const response = await fetch('/api/process', {
+      const response = await fetch('/api/upload', {
         method: 'POST',
         headers,
         body: formData
@@ -323,7 +329,7 @@ document.addEventListener('DOMContentLoaded', function() {
       
       if (!response.ok) {
         const errorData = await response.json();
-        throw new Error(errorData.error || 'Failed to process file');
+        throw new Error(errorData.message || errorData.error || 'Failed to process file');
       }
       
       const data = await response.json();
@@ -361,6 +367,11 @@ document.addEventListener('DOMContentLoaded', function() {
     try {
       showProcessing(true);
       
+      // Generate a session ID if not already set
+      if (!currentSessionId) {
+        currentSessionId = Date.now().toString() + Math.random().toString(36).substring(2, 8);
+      }
+      
       // Include auth token if available
       const headers = {
         'Content-Type': 'application/json'
@@ -373,7 +384,8 @@ document.addEventListener('DOMContentLoaded', function() {
       
       const requestData = { 
         text,
-        title
+        title,
+        sessionId: currentSessionId
       };
       
       // Add user ID if logged in
@@ -389,7 +401,7 @@ document.addEventListener('DOMContentLoaded', function() {
       
       if (!response.ok) {
         const errorData = await response.json();
-        throw new Error(errorData.error || 'Failed to process text');
+        throw new Error(errorData.message || errorData.error || 'Failed to process text');
       }
       
       const data = await response.json();
@@ -416,34 +428,62 @@ document.addEventListener('DOMContentLoaded', function() {
   
   // Handle Processed Content
   function handleProcessedContent(data) {
-    currentSessionId = data.sessionId;
-    currentContent = data;
-    
-    // Store flashcards and quizzes globally
-    flashcards = currentContent.flashcards || [];
-    quizzes = currentContent.quiz || [];
-    
-    // Update Summary Tab
-    if (currentContent.summary) {
-      summaryContent.innerHTML = `<p>${currentContent.summary}</p>`;
-    } else {
-      summaryContent.innerHTML = '<p class="no-content-message">No summary available.</p>';
-    }
-    
-    // Update Flashcards Tab
-    updateFlashcardsUI();
-    
-    // Update Quiz Tab
-    updateQuizUI();
-    
-    // Add initial message to chat if not already present
-    const contentIntroMessage = `I've analyzed your content (${currentContent.metadata?.contentType || 'text'}).
-      You can now view the summary, study flashcards, take a quiz, or chat with me about it!`;
-    
-    if (chatMessages.querySelectorAll('.chat-message').length <= 1) {
-      addChatMessage('bot', contentIntroMessage);
-    } else {
-      addChatMessage('bot', 'I\'ve processed a new document! Let me know if you have questions about it.');
+    try {
+      // Store the current session ID for later use
+      currentSessionId = data.sessionId || currentSessionId;
+      
+      // Store the processed content
+      currentContent = data;
+      
+      // Update Summary Tab
+      if (summaryContent) {
+        if (data.summary) {
+          summaryContent.innerHTML = `
+            <div class="summary-section">
+              <h3>Summary</h3>
+              <div class="content-text">${data.summary}</div>
+            </div>
+          `;
+        } else if (data.content && data.content.summary) {
+          summaryContent.innerHTML = `
+            <div class="summary-section">
+              <h3>Summary</h3>
+              <div class="content-text">${data.content.summary}</div>
+            </div>
+          `;
+        } else {
+          summaryContent.innerHTML = '<p class="no-content-message">No summary was generated. The content may be too short or not suitable for summarization.</p>';
+        }
+      }
+      
+      // Update Flashcards Tab
+      if (data.flashcards) {
+        flashcards = data.flashcards;
+      } else if (data.content && data.content.flashcards) {
+        flashcards = data.content.flashcards;
+      } else {
+        flashcards = [];
+      }
+      
+      currentFlashcardIndex = 0;
+      updateFlashcardsUI();
+      
+      // Update Quiz Tab
+      if (data.quiz) {
+        quizzes = data.quiz;
+      } else if (data.content && data.content.quiz) {
+        quizzes = data.content.quiz;
+      } else {
+        quizzes = [];
+      }
+      
+      updateQuizUI();
+      
+      // Add a message to the chat
+      addChatMessage('bot', 'I\'ve processed your content! You can now view the summary, flashcards, and quiz. How can I help you understand this material better?');
+    } catch (error) {
+      console.error('Error handling processed content:', error);
+      showNotification('Error displaying processed content', 'error');
     }
   }
   
@@ -695,18 +735,11 @@ document.addEventListener('DOMContentLoaded', function() {
   
   // ============= CHAT =============
   
-  // Send Message
-  sendMessageBtn.addEventListener('click', sendChatMessage);
-  
-  chatInput.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      sendChatMessage();
-    }
-  });
-  
-  async function sendChatMessage() {
+  // Send Chat Message
+  function sendChatMessage() {
+    const chatInput = document.getElementById('chat-input');
     const message = chatInput.value.trim();
+    
     if (!message) return;
     
     // Clear input
@@ -715,74 +748,145 @@ document.addEventListener('DOMContentLoaded', function() {
     // Add user message to chat
     addChatMessage('user', message);
     
-    // Process with GPT if we have content
-    if (currentSessionId && currentContent) {
-      try {
-        // Simulate typing indicator
-        const typingIndicator = addChatMessage('bot', '<div class="typing-indicator"><span></span><span></span><span></span></div>');
-        
-        // Create context from current content
-        const context = `
-          Based on the following content:
-          - Summary: ${currentContent.summary}
-          - Topics: ${currentContent.flashcards.map(f => f.question).join(', ')}
-          
-          Answer this question: ${message}
-        `;
-        
-        // Send to OpenAI (this would be a real API call, simulating for now)
-        // In a real implementation, you would create a backend endpoint to handle this
-        setTimeout(() => {
-          // Remove typing indicator
-          chatMessages.removeChild(typingIndicator);
-          
-          // Generate a response based on the question
-          let response = '';
-          
-          if (message.toLowerCase().includes('quiz') || message.toLowerCase().includes('test')) {
-            response = "I've generated a quiz for you! Click on the Quiz tab to test your knowledge.";
-          } else if (message.toLowerCase().includes('flashcard')) {
-            response = "You can study with flashcards in the Flashcards tab. They're generated based on the important concepts in your document.";
-          } else if (message.toLowerCase().includes('summary')) {
-            response = "I've created a summary of your document. Check it out in the Summary tab!";
-          } else {
-            // Mock a general response that references the content
-            const randomFlashcard = currentContent.flashcards[Math.floor(Math.random() * currentContent.flashcards.length)];
-            response = `Based on your content, ${randomFlashcard.question} ${randomFlashcard.answer}`;
-          }
-          
-          addChatMessage('bot', response);
-        }, 1000);
-      } catch (error) {
-        console.error('Error processing chat:', error);
-        addChatMessage('bot', 'Sorry, I encountered an error while processing your message. Please try again.');
+    // Show typing indicator
+    const typingIndicator = document.createElement('div');
+    typingIndicator.className = 'chat-message bot-typing';
+    typingIndicator.innerHTML = `
+      <div class="avatar bot-avatar">
+        <i class="fas fa-robot"></i>
+      </div>
+      <div class="message-content">
+        <div class="typing-indicator">
+          <span></span>
+          <span></span>
+          <span></span>
+        </div>
+      </div>
+    `;
+    chatMessages.appendChild(typingIndicator);
+    chatMessages.scrollTop = chatMessages.scrollHeight;
+    
+    // Process message with AI
+    processChatMessage(message, typingIndicator);
+  }
+  
+  // Process Chat Message with AI
+  async function processChatMessage(message, typingIndicator) {
+    try {
+      // Generate a session ID if not already set
+      if (!currentSessionId) {
+        currentSessionId = Date.now().toString() + Math.random().toString(36).substring(2, 8);
       }
-    } else {
-      // No content processed yet
-      addChatMessage('bot', 'Please upload a document or enter text first so I can assist you better!');
+      
+      const headers = {
+        'Content-Type': 'application/json'
+      };
+      
+      const authToken = localStorage.getItem('authToken');
+      if (authToken) {
+        headers['Authorization'] = `Bearer ${authToken}`;
+      }
+      
+      const response = await fetch('/api/chatbot', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          message,
+          sessionId: currentSessionId,
+          context: currentContent ? {
+            hasProcessedContent: true,
+            contentType: currentContent.metadata?.contentType || 'unknown',
+            title: documentTitle ? documentTitle.textContent : 'Untitled Document'
+          } : {
+            hasProcessedContent: false
+          }
+        })
+      });
+      
+      // Remove typing indicator
+      if (typingIndicator) {
+        typingIndicator.remove();
+      }
+      
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.message || errorData.error || 'Failed to get response');
+      }
+      
+      const data = await response.json();
+      
+      // Add bot response to chat
+      addChatMessage('bot', data.reply || data.message || 'I\'m not sure how to respond to that.');
+      
+      // Check for any actions to perform
+      if (data.actions) {
+        handleChatActions(data.actions);
+      }
+    } catch (error) {
+      console.error('Chat processing error:', error);
+      
+      // Remove typing indicator if it exists
+      if (typingIndicator) {
+        typingIndicator.remove();
+      }
+      
+      // Add error message
+      addChatMessage('bot', 'Sorry, I encountered an error while processing your message. Please try again.');
+    }
+  }
+  
+  // Handle Chat Actions
+  function handleChatActions(actions) {
+    if (!actions) return;
+    
+    if (actions.switchTab) {
+      const tabButton = document.querySelector(`[data-tab="${actions.switchTab}"]`);
+      if (tabButton) {
+        tabButton.click();
+      }
+    }
+    
+    if (actions.showNotification) {
+      showNotification(actions.showNotification.message, actions.showNotification.type || 'info');
     }
   }
   
   // Add Chat Message
   function addChatMessage(sender, text) {
     const messageElement = document.createElement('div');
-    messageElement.className = `chat-message ${sender}`;
+    messageElement.className = `chat-message ${sender}-message`;
     
     const avatar = document.createElement('div');
-    avatar.className = 'message-avatar';
-    avatar.innerHTML = sender === 'bot' ? '🤖' : '👤';
+    avatar.className = `avatar ${sender}-avatar`;
     
-    const content = document.createElement('div');
-    content.className = 'message-content';
-    content.innerHTML = `<p>${text}</p>`;
+    if (sender === 'user') {
+      avatar.innerHTML = '<i class="fas fa-user"></i>';
+    } else {
+      avatar.innerHTML = '<i class="fas fa-robot"></i>';
+    }
+    
+    const messageContent = document.createElement('div');
+    messageContent.className = 'message-content';
+    messageContent.innerHTML = text;
     
     messageElement.appendChild(avatar);
-    messageElement.appendChild(content);
+    messageElement.appendChild(messageContent);
     
     chatMessages.appendChild(messageElement);
     chatMessages.scrollTop = chatMessages.scrollHeight;
-    
-    return messageElement;
+  }
+  
+  // Add chat input event listeners
+  if (document.getElementById('chat-input')) {
+    document.getElementById('chat-input').addEventListener('keypress', (e) => {
+      if (e.key === 'Enter') {
+        sendChatMessage();
+      }
+    });
+  }
+  
+  if (document.getElementById('send-message')) {
+    document.getElementById('send-message').addEventListener('click', sendChatMessage);
   }
   
   // ============= UTILITIES =============

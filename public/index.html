@@ -248,22 +248,17 @@
         </div>
       </section>
 
-      <!-- Chat Assistant Tab -->
+      <!-- Chat Tab -->
       <section id="chat-tab" class="tab-content">
         <div class="card chat-card">
           <h2>Study Assistant Chat</h2>
           <div id="chat-container" class="chat-container">
             <div id="chat-messages" class="chat-messages">
-              <div class="chat-message bot">
-                <div class="message-avatar">🤖</div>
-                <div class="message-content">
-                  <p>Hello! I'm your study assistant. Ask me questions about the content you've uploaded.</p>
-                </div>
-              </div>
+              <!-- Chat messages will be added here dynamically -->
             </div>
-            <div class="chat-input-container">
-              <input type="text" id="chat-input" placeholder="Ask a question about your study material...">
-              <button id="send-message" class="send-btn">
+            <div id="chat-input-container" class="chat-input-container">
+              <textarea id="chat-input" placeholder="Ask me anything about your content..." rows="1"></textarea>
+              <button id="send-message" title="Send message">
                 <i class="fas fa-paper-plane"></i>
               </button>
             </div>
@@ -357,25 +352,34 @@
     </div>
   </div>
 
-  <!-- Chatbot Icon -->
-  <div id="chatbot-icon" onclick="toggleChat()">
-    <img src="https://cdn-icons-png.flaticon.com/512/5226/5226034.png" alt="SplanAI Assistant">
-  </div>
-
-  <!-- Chatbot Window -->
+  <!-- Chatbot Widget -->
+  <button id="toggle-chat" title="Chat with SplanAI">
+    <i class="fas fa-comment-dots"></i>
+  </button>
+  
   <div id="chatbot-container">
-    <div id="chat-header">
-      <span>SplanAI Assistant</span>
-      <button onclick="toggleChat()">&times;</button>
-    </div>
-    <div id="chat-body">
-      <div id="chat-messages">
-        <!-- Messages will be added dynamically -->
+    <div id="chatbot-header">
+      <div id="chatbot-title">
+        <i class="fas fa-robot"></i>
+        <span>SplanAI Assistant</span>
+      </div>
+      <div id="chatbot-controls">
+        <button id="minimize-chat" title="Minimize">
+          <i class="fas fa-minus"></i>
+        </button>
+        <button id="close-chat" title="Close">
+          <i class="fas fa-times"></i>
+        </button>
       </div>
     </div>
-    <div id="chat-footer">
-      <input type="text" id="user-input" placeholder="Type a message..." onkeypress="handleKeyPress(event)">
-      <button id="send-button" onclick="sendMessage()">Send</button>
+    <div id="chat-messages">
+      <!-- Chat messages will be added here dynamically -->
+    </div>
+    <div id="chat-input-container">
+      <input type="text" id="user-input" placeholder="Type your message here..." />
+      <button id="send-button" title="Send">
+        <i class="fas fa-paper-plane"></i>
+      </button>
     </div>
   </div>
 
