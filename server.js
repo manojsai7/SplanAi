@@ -42,6 +42,63 @@ const getValidMongoDBURI = (uri) => {
   return null;
 };
 
+// Enhanced MongoDB Atlas Connection
+const connectDB = async () => {
+  try {
+    // Validate and fix MongoDB URI format
+    let uri = process.env.MONGODB_URI || '';
+    
+    // Make sure the URI has the proper protocol
+    if (!uri.startsWith('mongodb://') && !uri.startsWith('mongodb+srv://')) {
+      console.log('Adding MongoDB protocol prefix to URI');
+      uri = 'mongodb+srv://' + uri;
+    }
+    
+    // Check if we need to encode the password in the URI
+    const uriRegex = /^mongodb(\+srv)?:\/\/([^:]+):([^@]+)@(.+)$/;
+    const match = uri.match(uriRegex);
+    
+    if (match) {
+      // Extract parts of the connection string
+      const protocol = match[1] ? 'mongodb+srv://' : 'mongodb://';
+      const username = match[2];
+      let password = match[3];
+      const hostAndRest = match[4];
+      
+      // Check if password contains special characters that need encoding
+      if (password.includes('%') === false && 
+          (password.includes('@') || password.includes('/') || 
+           password.includes(':') || password.includes('#') || 
+           password.includes(' ') || password.includes('+'))) {
+        console.log('Password contains special characters, encoding it');
+        password = encodeURIComponent(password);
+      }
+      
+      // Rebuild the URI with encoded password
+      uri = `${protocol}${username}:${password}@${hostAndRest}`;
+      console.log('Using properly encoded MongoDB URI');
+    }
+    
+    // Connect to MongoDB with the fixed URI
+    await mongoose.connect(uri, {
+      useNewUrlParser: true,
+      useUnifiedTopology: true,
+      retryWrites: true,
+      w: 'majority'
+    });
+    console.log('MongoDB Connected successfully');
+  } catch (err) {
+    console.error('Database Connection Error:', err);
+    if (err.message && err.message.includes('Password contains unescaped characters')) {
+      console.error('Please make sure your MongoDB password is properly encoded in the MONGODB_URI environment variable');
+      console.error('You can run the mongodb-uri-helper.js script to generate a properly encoded URI');
+    }
+  }
+};
+
+// Connect to MongoDB
+connectDB();
+
 // AI Clients Configuration
 let visionClient;
 try {
@@ -52,50 +109,108 @@ try {
       let credentials;
       const credentialString = process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON;
       
-      // First, try direct parsing
-      try {
-        credentials = JSON.parse(credentialString);
-        console.log('Successfully parsed Google credentials directly');
-      } catch (parseError) {
-        console.log('Direct parsing failed, trying alternative methods');
+      console.log('Attempting to process Google credentials from environment variable');
+      
+      // Heroku often formats environment variables in unexpected ways, try multiple methods
+      const parseAttempts = [
+        // Method 1: Direct parsing
+        () => {
+          try {
+            return JSON.parse(credentialString);
+          } catch (e) {
+            return null;
+          }
+        },
         
-        // If direct parsing fails, it might be double-quoted or have escape characters
-        try {
-          // If it's a quoted string (common when setting in Heroku)
-          if (credentialString.startsWith('"') || credentialString.startsWith("'")) {
-            // Remove outer quotes and try to parse
-            const unquoted = credentialString.replace(/^['"]|['"]$/g, '');
-            credentials = JSON.parse(unquoted);
-            console.log('Successfully parsed Google credentials after removing quotes');
-          } else {
-            // Try replacing escaped newlines and other common issues
+        // Method 2: Handle quoted strings
+        () => {
+          try {
+            if (credentialString.startsWith('"') && credentialString.endsWith('"')) {
+              return JSON.parse(credentialString.substring(1, credentialString.length - 1));
+            }
+            return null;
+          } catch (e) {
+            return null;
+          }
+        },
+        
+        // Method 3: Double-parsing for doubly stringified JSON
+        () => {
+          try {
+            return JSON.parse(JSON.parse(credentialString));
+          } catch (e) {
+            return null;
+          }
+        },
+        
+        // Method 4: Clean up common issues and try parsing
+        () => {
+          try {
             const cleaned = credentialString
               .replace(/\\n/g, '')
-              .replace(/\\/g, '')
+              .replace(/\\"/g, '"')
               .replace(/"{/g, '{')
-              .replace(/}"/g, '}');
-            credentials = JSON.parse(cleaned);
-            console.log('Successfully parsed Google credentials after cleaning string');
+              .replace(/}"/g, '}')
+              .replace(/^['"]|['"]$/g, '');
+            return JSON.parse(cleaned);
+          } catch (e) {
+            return null;
           }
-        } catch (altParseError) {
-          // If all parsing attempts fail, check if it's a Base64 encoded string
+        },
+        
+        // Method 5: For credentials that might be Base64 encoded
+        () => {
           try {
             if (/^[A-Za-z0-9+/=]+$/.test(credentialString)) {
               const decoded = Buffer.from(credentialString, 'base64').toString('utf-8');
-              credentials = JSON.parse(decoded);
-              console.log('Successfully parsed Google credentials from Base64');
-            } else {
-              throw new Error('Unable to parse credentials in any format');
+              return JSON.parse(decoded);
             }
-          } catch (b64Error) {
-            console.error('All parsing methods failed:', b64Error.message);
-            throw new Error('Unable to parse Google credentials JSON');
+            return null;
+          } catch (e) {
+            return null;
           }
+        },
+        
+        // Method 6: Last resort - split by newlines and try to reconstruct a valid JSON
+        () => {
+          try {
+            if (credentialString.includes('\n')) {
+              const lines = credentialString.split('\n').map(line => line.trim());
+              const jsonStr = lines.join('');
+              return JSON.parse(jsonStr);
+            }
+            return null;
+          } catch (e) {
+            return null;
+          }
+        }
+      ];
+      
+      // Try each parsing method until one works
+      for (const attempt of parseAttempts) {
+        credentials = attempt();
+        if (credentials) {
+          console.log('Successfully parsed Google credentials');
+          break;
         }
       }
       
+      // If all parsing attempts failed
+      if (!credentials) {
+        // Log the credential string format (safely) to help debugging
+        console.log('All parsing methods failed. Credential string format:');
+        console.log(`- Length: ${credentialString.length}`);
+        console.log(`- First 20 chars: ${credentialString.substring(0, 20)}...`);
+        console.log(`- Contains brackets: ${credentialString.includes('{') && credentialString.includes('}')}`);
+        console.log(`- Contains quotes: ${credentialString.includes('"')}`);
+        console.log(`- Contains escaped chars: ${credentialString.includes('\\')}`);
+        
+        throw new Error('Failed to parse credentials in any format');
+      }
+      
       // Validate that we have the minimum required fields for a service account
-      if (!credentials || !credentials.type || !credentials.project_id) {
+      if (!credentials.type || !credentials.project_id) {
+        console.log('Invalid credentials structure. Available keys:', Object.keys(credentials).join(', '));
         throw new Error('Invalid Google credentials format - missing required fields');
       }
       
@@ -144,93 +259,61 @@ const openai = new OpenAI({
   maxRetries: 3
 });
 
-// Enhanced MongoDB Atlas Connection
-const connectDB = async () => {
-  try {
-    // Ensure MongoDB URI is valid
-    let mongoUri = process.env.MONGODB_URI;
-    
-    // Ensure the URI has the correct prefix
-    if (!mongoUri) {
-      throw new Error('MongoDB URI is not provided in environment variables');
-    }
-    
-    if (!mongoUri.startsWith('mongodb://') && !mongoUri.startsWith('mongodb+srv://')) {
-      // Try adding the prefix if it looks like a MongoDB URI
-      if (mongoUri.includes('@') && mongoUri.includes('.mongodb.net')) {
-        mongoUri = `mongodb+srv://${mongoUri}`;
-        console.log('Added MongoDB protocol prefix to URI');
-      } else {
-        throw new Error('Invalid MongoDB URI format. Must start with mongodb:// or mongodb+srv://');
-      }
-    }
-    
-    await mongoose.connect(mongoUri, {
-      useNewUrlParser: true,
-      useUnifiedTopology: true,
-      retryWrites: true,
-      w: 'majority'
-    });
-    
-    console.log('MongoDB Connected successfully');
-  } catch (err) {
-    console.error('Database Connection Error:', err);
-    // Don't exit process in production - let the app continue without DB
-    if (process.env.NODE_ENV !== 'production') {
-      process.exit(1);
-    }
+// Session Configuration with proper MongoDB URI handling
+const sessionConfig = {
+  secret: process.env.SESSION_SECRET || 'fallback_session_secret',
+  resave: false,
+  saveUninitialized: false,
+  cookie: {
+    secure: process.env.NODE_ENV === 'production',
+    httpOnly: true,
+    maxAge: 7 * 24 * 60 * 60 * 1000 // 7 days
   }
 };
 
-// Call connectDB but don't wait - we'll handle connection failures gracefully
-connectDB();
-
-// =================== MIDDLEWARE ===================
-
-// Security configuration
-app.use(helmet({
-  contentSecurityPolicy: {
-    directives: {
-      defaultSrc: ["'self'"],
-      connectSrc: ["'self'", 'https://*.openai.com'],
-      scriptSrc: ["'self'", "'unsafe-inline'"],
-      styleSrc: ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com', 'https://cdnjs.cloudflare.com'],
-      fontSrc: ["'self'", 'https://fonts.gstatic.com', 'https://cdnjs.cloudflare.com'],
-      imgSrc: ["'self'", 'data:', 'https://cdn-icons-png.flaticon.com'],
-    },
-  },
-}));
-app.use(cors({
-  origin: process.env.CLIENT_URL || '*',
-  credentials: true
-}));
-app.use(rateLimit({
-  windowMs: 15 * 60 * 1000, // Limit each IP to 100 requests per windowMs
-  max: 100
-}));
-
-// Session configuration
-app.use(session({
-  secret: process.env.SESSION_SECRET || 'splanAI-super-secret',
-  resave: false,
-  saveUninitialized: false,
-  store: MongoStore.create({
-    mongoUrl: process.env.MONGODB_URI, // Use raw value - MongoStore has its own validation
-    collectionName: 'sessions',
-    ttl: 60 * 60 * 24 * 7, // 1 week
-    autoRemove: 'native',
-    touchAfter: 24 * 3600, // Only update the session once per day
-    crypto: {
-      secret: process.env.SESSION_SECRET || 'splanAI-super-secret'
-    },
-    stringify: false,
-    autoReconnect: true
-  }),
-  cookie: {
-    secure: process.env.NODE_ENV === 'production',
-    maxAge: 1000 * 60 * 60 * 24 * 7 // 1 week
+// Use MongoStore for session storage if MongoDB URI is available
+if (process.env.MONGODB_URI) {
+  try {
+    // Process the MongoDB URI for session store (similar to connectDB)
+    let uri = process.env.MONGODB_URI;
+    
+    // Make sure the URI has the proper protocol
+    if (!uri.startsWith('mongodb://') && !uri.startsWith('mongodb+srv://')) {
+      uri = 'mongodb+srv://' + uri;
+    }
+    
+    // Encode password if needed
+    const uriRegex = /^mongodb(\+srv)?:\/\/([^:]+):([^@]+)@(.+)$/;
+    const match = uri.match(uriRegex);
+    
+    if (match) {
+      const protocol = match[1] ? 'mongodb+srv://' : 'mongodb://';
+      const username = match[2];
+      let password = match[3];
+      const hostAndRest = match[4];
+      
+      if (password.includes('%') === false && 
+          (password.includes('@') || password.includes('/') || 
+           password.includes(':') || password.includes('#') || 
+           password.includes(' ') || password.includes('+'))) {
+        password = encodeURIComponent(password);
+      }
+      
+      uri = `${protocol}${username}:${password}@${hostAndRest}`;
+    }
+    
+    console.log('Initializing MongoStore for session storage');
+    sessionConfig.store = MongoStore.create({
+      mongoUrl: uri,
+      ttl: 14 * 24 * 60 * 60, // 14 days
+      autoRemove: 'native',
+      touchAfter: 24 * 3600 // 24 hours
+    });
+  } catch (sessionErr) {
+    console.error('Error initializing MongoStore:', sessionErr.message);
+    console.log('Falling back to in-memory session store');
   }
-}));
+}
 
 // Express App Configuration
 app.use(express.json()); // Support for JSON payloads
@@ -529,6 +612,33 @@ const processContent = async (buffer, sessionId, fileType, userId = null) => {
     throw new Error('Advanced content processing failed: ' + error.message);
   }
 };
+
+// =================== MIDDLEWARE ===================
+
+// Security configuration
+app.use(helmet({
+  contentSecurityPolicy: {
+    directives: {
+      defaultSrc: ["'self'"],
+      connectSrc: ["'self'", 'https://*.openai.com'],
+      scriptSrc: ["'self'", "'unsafe-inline'"],
+      styleSrc: ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com', 'https://cdnjs.cloudflare.com'],
+      fontSrc: ["'self'", 'https://fonts.gstatic.com', 'https://cdnjs.cloudflare.com'],
+      imgSrc: ["'self'", 'data:', 'https://cdn-icons-png.flaticon.com'],
+    },
+  },
+}));
+app.use(cors({
+  origin: process.env.CLIENT_URL || '*',
+  credentials: true
+}));
+app.use(rateLimit({
+  windowMs: 15 * 60 * 1000, // Limit each IP to 100 requests per windowMs
+  max: 100
+}));
+
+// Session configuration
+app.use(session(sessionConfig));
 
 // =================== API Endpoints ===================
 
