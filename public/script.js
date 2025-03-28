@@ -542,6 +542,10 @@ document.addEventListener('DOMContentLoaded', function() {
     const flashcard = flashcards[currentFlashcardIndex];
     cardCounter.textContent = `${currentFlashcardIndex + 1}/${flashcards.length}`;
     
+    // Format the question and answer text to ensure proper display
+    const formattedQuestion = formatFlashcardText(flashcard.question || 'No question available');
+    const formattedAnswer = formatFlashcardText(flashcard.answer || 'No answer available');
+    
     // Create a new flashcard element from scratch instead of using template
     const cardElement = document.createElement('div');
     cardElement.className = 'flashcard-wrapper';
@@ -552,7 +556,7 @@ document.addEventListener('DOMContentLoaded', function() {
           <div class="flashcard-front">
             <div class="card-content">
               <h3>Question</h3>
-              <p class="card-text">${flashcard.question || 'No question available'}</p>
+              <div class="card-text">${formattedQuestion}</div>
             </div>
             <div class="card-footer">
               <button class="flip-btn">Show Answer</button>
@@ -561,7 +565,7 @@ document.addEventListener('DOMContentLoaded', function() {
           <div class="flashcard-back">
             <div class="card-content">
               <h3>Answer</h3>
-              <p class="card-text">${flashcard.answer || 'No answer available'}</p>
+              <div class="card-text">${formattedAnswer}</div>
             </div>
             <div class="card-footer">
               <div class="tags-container">
@@ -593,6 +597,22 @@ document.addEventListener('DOMContentLoaded', function() {
     flashcardsContainer.innerHTML = '';
     flashcardsContainer.appendChild(cardElement);
     console.log('Flashcard displayed successfully');
+  }
+  
+  // Helper function to format flashcard text for proper display
+  function formatFlashcardText(text) {
+    if (!text) return '';
+    
+    // Replace multiple newlines with a single one to avoid excessive spacing
+    let formatted = text.replace(/\n{3,}/g, '\n\n');
+    
+    // Replace single newlines with <br> tags for proper HTML rendering
+    formatted = formatted.replace(/\n/g, '<br>');
+    
+    // Add proper spacing after punctuation if missing
+    formatted = formatted.replace(/([.!?])([A-Z])/g, '$1 $2');
+    
+    return formatted;
   }
   
   // Flashcard Navigation
