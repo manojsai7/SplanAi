@@ -1639,9 +1639,13 @@ const auth = async (req, res, next) => {
             ...more questions
           ]
           
+          IMPORTANT: Make sure to return ONLY the JSON array without any additional text or formatting.
+          
           Content:
           ${contentText.substring(0, Math.min(contentText.length, 10000))}
         `;
+        
+        console.log('🧠 Sending quiz generation prompt to AI');
         
         const response = await getAIResponse(prompt, {
           temperature: 0.5,
@@ -1650,6 +1654,7 @@ const auth = async (req, res, next) => {
         
         const responseText = response.text;
         console.log('AI Response received for quiz');
+        console.log('Response preview:', responseText.substring(0, 200) + '...');
         
         // Parse the response to extract the JSON
         let quizJson;
@@ -1687,6 +1692,7 @@ const auth = async (req, res, next) => {
           }
           
           console.log(`Successfully parsed ${quizJson.length} quiz questions`);
+          console.log('First question sample:', JSON.stringify(quizJson[0], null, 2));
         } catch (parseError) {
           console.error('Error parsing quiz JSON:', parseError);
           console.log('Raw response:', responseText);

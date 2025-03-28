@@ -730,18 +730,25 @@ document.addEventListener('DOMContentLoaded', function() {
     quizAnswered = true;
     const quiz = quizzes[currentQuizIndex];
     
-    // Determine the correct answer - handle both string and number index
-    let correctOption;
+    // Determine the correct answer - handle different formats of correct answer
+    let correctOption = '';
+    
     if (typeof quiz.correctAnswer === 'number' && quiz.options && quiz.options[quiz.correctAnswer]) {
+      // If correctAnswer is provided as an index
       correctOption = quiz.options[quiz.correctAnswer];
     } else if (typeof quiz.answer === 'string') {
+      // If answer is provided as a string (the actual answer text)
       correctOption = quiz.answer;
+    } else if (typeof quiz.correctOption === 'string') {
+      // Alternative property name
+      correctOption = quiz.correctOption;
     } else {
-      console.error('Could not determine correct answer');
+      console.error('Could not determine correct answer format:', quiz);
       correctOption = selectedOption; // Fallback to avoid errors
     }
     
     const isCorrect = selectedOption === correctOption;
+    console.log(`Answer check: Selected "${selectedOption}", Correct "${correctOption}", Result: ${isCorrect ? 'Correct' : 'Incorrect'}`);
     
     // Show feedback
     quizFeedback.classList.remove('hidden');
@@ -1686,6 +1693,7 @@ document.addEventListener('DOMContentLoaded', function() {
         // Get response as text first
         const responseText = await response.text();
         console.log('Quiz generation response received');
+        console.log('Raw response:', responseText.substring(0, 200) + '...'); // Log first 200 chars
         
         try {
           // Try to parse as JSON
@@ -1711,10 +1719,29 @@ document.addEventListener('DOMContentLoaded', function() {
         quizzes = data.quiz;
         currentQuizIndex = 0;
         correctAnswers = 0;
+        
+        // Ensure all quiz questions have the required properties
+        quizzes = quizzes.map(q => {
+          // Make sure each question has the correct structure
+          return {
+            question: q.question || 'Question not available',
+            options: Array.isArray(q.options) ? q.options : [],
+            answer: q.answer || '',
+            explanation: q.explanation || 'No explanation provided'
+          };
+        });
+        
+        // Filter out any invalid questions
+        quizzes = quizzes.filter(q => q.options.length > 0 && q.answer);
+        
+        if (quizzes.length === 0) {
+          throw new Error('No valid quiz questions were generated');
+        }
+        
         updateQuizUI();
         
         // Show notification
-        showNotification('Quiz generated successfully!', 'success');
+        showNotification(`Quiz generated successfully with ${quizzes.length} questions!`, 'success');
         
         // Switch to Quiz tab
         document.querySelector('[data-tab="quiz-tab"]').click();
