@@ -542,6 +542,11 @@ document.addEventListener('DOMContentLoaded', function() {
     
     // Clone flashcard template
     const template = document.getElementById('flashcard-template');
+    if (!template) {
+      console.error('Flashcard template not found in the DOM');
+      return;
+    }
+    
     const cardElement = template.cloneNode(true);
     cardElement.id = '';
     cardElement.classList.remove('hidden');
@@ -551,11 +556,16 @@ document.addEventListener('DOMContentLoaded', function() {
     const backText = cardElement.querySelector('.flashcard-back .card-text');
     const tagsContainer = cardElement.querySelector('.tags-container');
     
+    if (!frontText || !backText) {
+      console.error('Card text elements not found in the template');
+      return;
+    }
+    
     frontText.textContent = flashcard.question;
     backText.textContent = flashcard.answer;
     
     // Add tags if available
-    if (flashcard.tags && flashcard.tags.length) {
+    if (tagsContainer && flashcard.tags && flashcard.tags.length) {
       tagsContainer.innerHTML = '';
       flashcard.tags.forEach(tag => {
         const tagElement = document.createElement('span');
@@ -569,11 +579,13 @@ document.addEventListener('DOMContentLoaded', function() {
     const flipButtons = cardElement.querySelectorAll('.flip-btn');
     const cardInner = cardElement.querySelector('.flashcard-inner');
     
-    flipButtons.forEach(button => {
-      button.addEventListener('click', () => {
-        cardInner.classList.toggle('flipped');
+    if (flipButtons && cardInner) {
+      flipButtons.forEach(button => {
+        button.addEventListener('click', () => {
+          cardInner.classList.toggle('flipped');
+        });
       });
-    });
+    }
     
     // Clear container and add card
     flashcardsContainer.innerHTML = '';

@@ -223,8 +223,8 @@ async function getAIResponse(prompt, options = {}) {
   
   // Try Gemini models in order
   const modelVersions = [
-    "gemini-pro",  // Most widely available model
-    "gemini-1.0-pro",
+    // "gemini-pro",  // Most widely available model
+    // "gemini-1.0-pro",
     "gemini-1.5-flash",
     "gemini-flash"
   ];
@@ -1537,10 +1537,20 @@ const auth = async (req, res, next) => {
         }
         
         // Save flashcards to the database
-        content.flashcards = flashcardsJson;
-        await content.save();
-        
-        console.log(`✅ Generated ${flashcardsJson.length} flashcards successfully`);
+        try {
+          // Fetch the latest version of the content to avoid version conflicts
+          const updatedContent = await Content.findOne({ sessionId });
+          if (!updatedContent) {
+            return res.status(404).json({ error: 'Content not found for this session' });
+          }
+          
+          updatedContent.flashcards = flashcardsJson;
+          await updatedContent.save();
+          console.log(`✅ Generated ${flashcardsJson.length} flashcards successfully`);
+        } catch (saveError) {
+          console.error('❌ Error saving flashcards to database:', saveError);
+          // Continue to return the generated flashcards even if saving fails
+        }
         
         return res.status(200).json({ 
           message: 'Flashcards generated successfully',
@@ -1655,10 +1665,20 @@ const auth = async (req, res, next) => {
         }
         
         // Save quiz to the database
-        content.quizzes = quizJson;
-        await content.save();
-        
-        console.log(`✅ Generated ${quizJson.length} quiz questions successfully`);
+        try {
+          // Fetch the latest version of the content to avoid version conflicts
+          const updatedContent = await Content.findOne({ sessionId });
+          if (!updatedContent) {
+            return res.status(404).json({ error: 'Content not found for this session' });
+          }
+          
+          updatedContent.quizzes = quizJson;
+          await updatedContent.save();
+          console.log(`✅ Generated ${quizJson.length} quiz questions successfully`);
+        } catch (saveError) {
+          console.error('❌ Error saving quiz to database:', saveError);
+          // Continue to return the generated quiz even if saving fails
+        }
         
         return res.status(200).json({ 
           message: 'Quiz generated successfully',

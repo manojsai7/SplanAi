@@ -999,6 +999,115 @@ textarea:focus {
 }
 
 /* Responsive Styles */
+@media (max-width: 1200px) {
+  .app-container {
+    max-width: 95%;
+  }
+}
+
+@media (max-width: 992px) {
+  .tab-nav {
+    flex-wrap: wrap;
+  }
+  
+  .tab-nav-item {
+    margin-bottom: 10px;
+  }
+  
+  .card {
+    padding: 20px;
+  }
+  
+  .upload-container {
+    flex-direction: column;
+  }
+  
+  .upload-option {
+    width: 100%;
+    margin-bottom: 15px;
+  }
+}
+
+@media (max-width: 768px) {
+  .app-header {
+    flex-direction: column;
+    padding: 15px;
+    gap: 15px;
+  }
+  
+  .header-controls {
+    width: 100%;
+    justify-content: space-between;
+  }
+  
+  .tab-content {
+    padding: 15px;
+  }
+  
+  .flashcard {
+    width: 100%;
+    height: 300px;
+  }
+  
+  .quiz-options {
+    grid-template-columns: 1fr;
+  }
+  
+  .documents-list-header {
+    display: none;
+  }
+  
+  .document-item {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 15px;
+  }
+  
+  .doc-column {
+    width: 100%;
+    padding: 5px 0;
+  }
+  
+  .doc-actions {
+    justify-content: flex-start;
+  }
+}
+
+@media (max-width: 576px) {
+  .app-container {
+    max-width: 100%;
+    padding: 0;
+  }
+  
+  .app-header {
+    border-radius: 0;
+  }
+  
+  .tab-nav-item {
+    padding: 8px 12px;
+    font-size: 14px;
+  }
+  
+  .card {
+    padding: 15px;
+    margin-bottom: 15px;
+  }
+  
+  .modal-content {
+    width: 95%;
+    padding: 15px;
+  }
+  
+  .chat-input-container {
+    padding: 10px;
+  }
+  
+  #chat-input {
+    padding: 8px;
+  }
+}
+
 @media (max-width: 768px) {
   .app-header {
     padding: 0 1rem;
