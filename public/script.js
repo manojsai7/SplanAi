@@ -131,6 +131,12 @@ document.addEventListener('DOMContentLoaded', function() {
       // Activate selected tab
       button.classList.add('active');
       document.getElementById(tabId).classList.add('active');
+      
+      // Special handling for quiz tab - refresh the quiz display if we have quizzes
+      if (tabId === 'quiz-tab' && quizzes && quizzes.length > 0) {
+        console.log('Switching to quiz tab, refreshing quiz display');
+        updateQuizUI();
+      }
     });
   });
   
@@ -640,20 +646,30 @@ document.addEventListener('DOMContentLoaded', function() {
   // Update Quiz UI
   function updateQuizUI() {
     if (!quizzes || quizzes.length === 0) {
+      console.log('No quizzes available to display');
       quizContainer.innerHTML = '<div class="no-content-message">No quiz available. Upload a document or enter text first.</div>';
       return;
     }
+    
+    console.log(`Updating quiz UI with ${quizzes.length} questions`);
     
     // Reset quiz state
     currentQuizIndex = 0;
     correctAnswers = 0;
     
-    // Show quiz content
-    document.querySelector('.no-content-message')?.classList.add('hidden');
+    // Show quiz content and hide no-content message
+    const noContentMessage = document.querySelector('#quiz-container .no-content-message');
+    if (noContentMessage) {
+      noContentMessage.classList.add('hidden');
+    }
+    
+    // Make sure quiz content is visible
     quizContent.classList.remove('hidden');
     
     // Start quiz
     showQuizQuestion();
+    
+    console.log('Quiz UI updated successfully');
   }
   
   // Show Quiz Question
@@ -678,6 +694,7 @@ document.addEventListener('DOMContentLoaded', function() {
     quizResults.classList.add('hidden');
     
     const quiz = quizzes[currentQuizIndex];
+    console.log('Current quiz question:', quiz);
     
     // Set question
     quizQuestion.textContent = quiz.question || 'No question available';
@@ -694,6 +711,8 @@ document.addEventListener('DOMContentLoaded', function() {
       quizOptions.innerHTML = '<div class="error-message">No options available for this question</div>';
       return;
     }
+    
+    console.log(`Adding ${options.length} options to the quiz question`);
     
     options.forEach((option, index) => {
       const optionElement = document.createElement('div');
@@ -719,6 +738,9 @@ document.addEventListener('DOMContentLoaded', function() {
       
       quizOptions.appendChild(optionElement);
     });
+    
+    // Make sure the quiz options container is visible
+    quizOptions.classList.remove('hidden');
     
     console.log('Quiz question displayed successfully');
   }
