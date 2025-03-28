@@ -514,7 +514,7 @@ const processTextContent = async (text, sessionId, metadata = {}, userId = null)
     const fullText = text.trim();
     
     // AI Processing with Google Generative AI
-    console.log('Processing with Google Generative AI, text length:', fullText.length);
+    console.log(' Processing with Google Generative AI, text length:', fullText.length);
     
     try {
       // Get the Gemini Pro model
@@ -524,7 +524,7 @@ const processTextContent = async (text, sessionId, metadata = {}, userId = null)
       console.log('Starting Gemini processing...');
       
       // Generate summary
-      const summaryPrompt = `Summarize this in three paragraphs:\n${fullText}`;
+      const summaryPrompt = `Summarize this in three paragraphs:\n${fullText.substring(0, Math.min(fullText.length, 15000))}`;
       const summaryResult = await model.generateContent(summaryPrompt);
       const summary = summaryResult.response.text();
       
@@ -538,7 +538,7 @@ const processTextContent = async (text, sessionId, metadata = {}, userId = null)
           "tags": ["tag1", "tag2"]
         }
       ]
-      Text: ${fullText}`;
+      Text: ${fullText.substring(0, Math.min(fullText.length, 15000))}`;
       
       const flashcardsResult = await model.generateContent(flashcardsPrompt);
       const flashcardsText = flashcardsResult.response.text();
@@ -553,7 +553,7 @@ const processTextContent = async (text, sessionId, metadata = {}, userId = null)
           "explanation": "Brief explanation here"
         }
       ]
-      Text: ${fullText}`;
+      Text: ${fullText.substring(0, Math.min(fullText.length, 15000))}`;
       
       const quizzesResult = await model.generateContent(quizzesPrompt);
       const quizzesText = quizzesResult.response.text();
@@ -566,22 +566,22 @@ const processTextContent = async (text, sessionId, metadata = {}, userId = null)
       
       try {
         // Parse JSON responses with error handling
-        flashcards = JSON.parse(extractJSONFromString(flashcardsText));
-        quizzes = JSON.parse(extractJSONFromString(quizzesText));
+        flashcards = JSON.parse(extractJSONFromString(flashcardsText)) || [];
+        quizzes = JSON.parse(extractJSONFromString(quizzesText)) || [];
+        
+        // Validate the arrays
+        if (!Array.isArray(flashcards)) flashcards = [];
+        if (!Array.isArray(quizzes)) quizzes = [];
       } catch (jsonError) {
         console.error('Error parsing AI response JSON:', jsonError);
         // Create fallback content if parsing fails
-        if (!Array.isArray(flashcards) || flashcards.length === 0) {
-          flashcards = [{ question: "What is this text about?", answer: "Unable to generate specific flashcards", confidence: 0.5, tags: ["general"] }];
-        }
-        if (!Array.isArray(quizzes) || quizzes.length === 0) {
-          quizzes = [{ 
-            question: "What is the main topic discussed?", 
-            options: ["Topic A", "Topic B", "Topic C", "Cannot determine"], 
-            answer: "Cannot determine", 
-            explanation: "Unable to generate specific questions from the text."
-          }];
-        }
+        flashcards = [{ question: "What is this text about?", answer: "Unable to generate specific flashcards", confidence: 0.5, tags: ["general"] }];
+        quizzes = [{ 
+          question: "What is the main topic discussed?", 
+          options: ["Topic A", "Topic B", "Topic C", "Cannot determine"], 
+          answer: "Cannot determine", 
+          explanation: "Unable to generate specific questions from the text."
+        }];
       }
       
       // Generate title using the AI
@@ -589,16 +589,17 @@ const processTextContent = async (text, sessionId, metadata = {}, userId = null)
       
       if (!title) {
         try {
-          const titlePrompt = `Create a very short title (5-7 words max) for this text:\n${fullText.substring(0, 1000)}...`;
+          const titlePrompt = `Create a very short title (5-7 words max) for this text:\n${fullText.substring(0, Math.min(fullText.length, 1000))}`;
           const titleResult = await model.generateContent(titlePrompt);
-          title = titleResult.response.text().trim() || 'Untitled Document';
+          title = titleResult.response.text().trim();
+          if (!title) title = 'Untitled Document';
         } catch (titleError) {
           console.error('Error generating title:', titleError);
           title = 'Untitled Document';
         }
       }
       
-      // Save results to database if connected
+      // Create result object
       const contentData = {
         sessionId,
         title,
@@ -622,14 +623,22 @@ const processTextContent = async (text, sessionId, metadata = {}, userId = null)
       // Save to database if mongoose is connected
       if (mongoose.connection.readyState === 1) {
         try {
-          await Content.findOneAndUpdate(
-            { sessionId },
-            contentData,
-            { upsert: true, new: true }
-          );
-          console.log('Content saved to database with sessionId:', sessionId);
+          // Try to find existing document first
+          let existingContent = await Content.findOne({ sessionId });
+          
+          if (existingContent) {
+            // Update existing document
+            Object.assign(existingContent, contentData);
+            await existingContent.save();
+            console.log('Updated existing content in database with sessionId:', sessionId);
+          } else {
+            // Create new document
+            await Content.create(contentData);
+            console.log('Created new content in database with sessionId:', sessionId);
+          }
         } catch (dbError) {
           console.error('Error saving to database:', dbError);
+          // Continue with the processing even if DB save fails
         }
       } else {
         console.log('Database not connected, skipping save');
@@ -649,47 +658,78 @@ const processTextContent = async (text, sessionId, metadata = {}, userId = null)
 // Enhanced AI Processing Pipeline for file uploads
 const processContent = async (buffer, sessionId, fileType, userId = null) => {
   try {
-    // Detect content type and handle accordingly
-    let fullText = '';
-    let contentType = 'unknown';
+    if (!buffer || !sessionId || !fileType) {
+      throw new Error('Missing required parameters for content processing');
+    }
     
-    // Handle different file types
-    if (fileType && fileType.includes('image')) {
-      // Image files - use Vision API for OCR
-      contentType = 'image';
-      const [ocrResult] = await visionClient.documentTextDetection({
-        image: { content: buffer.toString('base64') }
-      });
-      fullText = ocrResult.fullTextAnnotation?.text || '';
-    } else if (fileType && fileType.includes('pdf')) {
-      // PDF files - use Vision API for OCR
-      contentType = 'pdf';
-      const [ocrResult] = await visionClient.documentTextDetection({
-        image: { content: buffer.toString('base64') }
-      });
-      fullText = ocrResult.fullTextAnnotation?.text || '';
-    } else {
-      // Try to extract as text
-      contentType = 'text';
+    console.log(`🔍 Processing file of type: ${fileType}`);
+    
+    // Default to text for fallback
+    let contentType = 'Unknown';
+    let text = '';
+    
+    // Process based on file type
+    if (fileType.includes('image/')) {
+      contentType = 'Image';
+      
       try {
-        fullText = buffer.toString('utf8');
-      } catch (e) {
-        throw new Error('Unsupported file type or corrupted file');
+        // Validate buffer
+        if (!buffer || buffer.length === 0) {
+          throw new Error('Empty image buffer');
+        }
+        
+        // Run OCR with error handling
+        console.log('📷 Running OCR on image...');
+        const [result] = await visionClient.documentTextDetection(buffer);
+        
+        if (!result || !result.fullTextAnnotation) {
+          throw new Error('No text detected in image');
+        }
+        
+        text = result.fullTextAnnotation.text || '';
+        console.log(`✅ OCR complete. Extracted ${text.length} characters`);
+        
+        if (text.trim().length === 0) {
+          throw new Error('No text content extracted from image');
+        }
+      } catch (ocrError) {
+        console.error('OCR processing error:', ocrError);
+        throw new Error(`OCR processing failed: ${ocrError.message}`);
       }
+    } else if (fileType.includes('application/pdf')) {
+      contentType = 'PDF';
+      text = 'PDF processing is currently not supported directly. Please extract text and submit it directly.';
+      throw new Error('PDF processing not implemented');
+    } else if (fileType.includes('text/')) {
+      contentType = 'Text';
+      
+      try {
+        // Convert buffer to text
+        text = buffer.toString('utf8');
+        if (!text || text.trim().length === 0) {
+          throw new Error('Text file contains no content');
+        }
+        console.log(`✅ Text file processed. ${text.length} characters extracted`);
+      } catch (textError) {
+        console.error('Text processing error:', textError);
+        throw new Error(`Text processing failed: ${textError.message}`);
+      }
+    } else {
+      throw new Error(`Unsupported file type: ${fileType}`);
     }
-
-    if (!fullText || fullText.trim().length === 0) {
-      throw new Error('Could not extract text from the uploaded file');
-    }
-
-    // Process the extracted text
-    return processTextContent(fullText, sessionId, {
+    
+    // Process the extracted text content with AI
+    console.log('🧠 Processing content with AI...');
+    const result = await processTextContent(text, sessionId, {
+      fileType,
       contentType,
-      source: 'upload'
+      source: 'file-upload'
     }, userId);
-  } catch (error) {
-    console.error('AI Processing Error:', error);
-    throw new Error('Advanced content processing failed: ' + error.message);
+    
+    return result;
+  } catch (err) {
+    console.error('Content processing error:', err);
+    throw err;
   }
 };
 
@@ -873,23 +913,36 @@ app.post('/api/process', upload.single('file'), async (req, res) => {
     }
     
     // Get user ID if authenticated
-    const userId = req.session.userId || null;
+    const userId = req.session?.userId || null;
     
     const sessionId = uuidv4();
     const fileType = req.file.mimetype;
     
     console.log(`Processing uploaded file: ${fileType}`);
+    
+    // First check if MongoDB is connected before proceeding
+    if (mongoose.connection.readyState !== 1) {
+      console.warn('MongoDB not connected during file processing');
+    }
+    
     const result = await processContent(req.file.buffer, sessionId, fileType, userId);
     
+    // Send a more complete response with all necessary data
     res.json({ 
       sessionId, 
-      content: result.content,
-      title: result.title,
+      title: result.title || 'Untitled Document',
+      summary: result.summary,
+      flashcards: result.flashcards,
+      quizzes: result.quizzes,
+      originalText: result.originalText,
       message: 'File processed successfully' 
     });
   } catch (error) {
     console.error('Error processing file:', error);
-    res.status(500).json({ error: error.message || 'Unknown error occurred' });
+    res.status(500).json({ 
+      error: 'Failed to process file',
+      details: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
   }
 });
 
@@ -903,31 +956,39 @@ app.post('/api/process-text', express.json(), async (req, res) => {
     }
     
     // Get user ID if authenticated
-    const userId = req.session.userId || null;
+    const userId = req.session?.userId || null;
     
     const sessionId = uuidv4();
     console.log(`Processing direct text input, length: ${text.length}`);
     
-    const result = await processTextContent(text, sessionId, {
-      contentType: 'text',
-      source: 'direct-input'
-    }, userId);
-    
-    // If title provided, update the document
-    if (title && title.trim()) {
-      result.title = title.trim();
-      await result.save();
+    // First check if MongoDB is connected before proceeding
+    if (mongoose.connection.readyState !== 1) {
+      console.warn('MongoDB not connected during text processing');
     }
     
+    const metadata = {
+      contentType: 'text',
+      source: 'direct-input',
+      title: title && title.trim() ? title.trim() : undefined
+    };
+    
+    const result = await processTextContent(text, sessionId, metadata, userId);
+    
+    // Return the processed data
     res.json({ 
-      sessionId, 
-      content: result.content,
-      title: result.title,
-      message: 'Text processed successfully' 
+      sessionId,
+      title: result.title || 'Untitled Document',
+      summary: result.summary,
+      flashcards: result.flashcards,
+      quizzes: result.quizzes,
+      message: 'Text processed successfully'
     });
   } catch (error) {
     console.error('Error processing text:', error);
-    res.status(500).json({ error: error.message || 'Unknown error occurred' });
+    res.status(500).json({ 
+      error: 'Failed to process text',
+      details: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
   }
 });
 
@@ -1203,10 +1264,69 @@ if (process.env.NODE_ENV === 'production') {
   });
 }
 
+// Helper function to extract JSON from a string that might contain other text
 function extractJSONFromString(str) {
   try {
-    return JSON.parse(str);
-  } catch (e) {
-    return str;
+    // If it's already valid JSON, return it
+    try {
+      JSON.parse(str);
+      return str;
+    } catch (e) {
+      // Continue with extraction
+    }
+    
+    // Find the first occurrence of '[' or '{'
+    const firstBracketIndex = str.indexOf('[');
+    const firstBraceIndex = str.indexOf('{');
+    
+    let startIndex;
+    let endIndex;
+    let openChar;
+    let closeChar;
+    
+    // Determine which comes first: [ or {
+    if (firstBracketIndex !== -1 && (firstBraceIndex === -1 || firstBracketIndex < firstBraceIndex)) {
+      startIndex = firstBracketIndex;
+      openChar = '[';
+      closeChar = ']';
+    } else if (firstBraceIndex !== -1) {
+      startIndex = firstBraceIndex;
+      openChar = '{';
+      closeChar = '}';
+    } else {
+      // No JSON found
+      return '[]';
+    }
+    
+    // Find the matching closing bracket/brace
+    let count = 1;
+    let i = startIndex + 1;
+    
+    while (count > 0 && i < str.length) {
+      if (str[i] === openChar) count++;
+      else if (str[i] === closeChar) count--;
+      i++;
+    }
+    
+    if (count === 0) {
+      endIndex = i;
+      // Extract the JSON string
+      const jsonStr = str.substring(startIndex, endIndex);
+      
+      // Validate it's valid JSON
+      try {
+        JSON.parse(jsonStr);
+        return jsonStr;
+      } catch (e) {
+        console.error('Extracted string is not valid JSON:', e);
+        return openChar === '[' ? '[]' : '{}';
+      }
+    }
+    
+    // If we couldn't find matching brackets/braces, return a default empty array or object
+    return openChar === '[' ? '[]' : '{}';
+  } catch (error) {
+    console.error('JSON extraction error:', error);
+    return '[]';
   }
 }
