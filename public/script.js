@@ -528,52 +528,53 @@ document.addEventListener('DOMContentLoaded', function() {
     // Reset to first card
     currentFlashcardIndex = 0;
     
-    // Create flashcard elements
-    flashcardsContainer.innerHTML = '';
     displayCurrentFlashcard();
   }
   
   // Display Current Flashcard
   function displayCurrentFlashcard() {
-    if (!flashcards || flashcards.length === 0) return;
+    if (!flashcards || flashcards.length === 0) {
+      console.log('No flashcards available to display');
+      return;
+    }
     
+    console.log(`Displaying flashcard ${currentFlashcardIndex + 1}/${flashcards.length}`);
     const flashcard = flashcards[currentFlashcardIndex];
     cardCounter.textContent = `${currentFlashcardIndex + 1}/${flashcards.length}`;
     
-    // Clone flashcard template
-    const template = document.getElementById('flashcard-template');
-    if (!template) {
-      console.error('Flashcard template not found in the DOM');
-      return;
-    }
+    // Create a new flashcard element from scratch instead of using template
+    const cardElement = document.createElement('div');
+    cardElement.className = 'flashcard-wrapper';
     
-    const cardElement = template.cloneNode(true);
-    cardElement.id = '';
-    cardElement.classList.remove('hidden');
-    
-    // Set content
-    const frontText = cardElement.querySelector('.flashcard-front .card-text');
-    const backText = cardElement.querySelector('.flashcard-back .card-text');
-    const tagsContainer = cardElement.querySelector('.tags-container');
-    
-    if (!frontText || !backText) {
-      console.error('Card text elements not found in the template');
-      return;
-    }
-    
-    frontText.textContent = flashcard.question;
-    backText.textContent = flashcard.answer;
-    
-    // Add tags if available
-    if (tagsContainer && flashcard.tags && flashcard.tags.length) {
-      tagsContainer.innerHTML = '';
-      flashcard.tags.forEach(tag => {
-        const tagElement = document.createElement('span');
-        tagElement.className = 'tag';
-        tagElement.textContent = tag;
-        tagsContainer.appendChild(tagElement);
-      });
-    }
+    cardElement.innerHTML = `
+      <div class="flashcard">
+        <div class="flashcard-inner">
+          <div class="flashcard-front">
+            <div class="card-content">
+              <h3>Question</h3>
+              <p class="card-text">${flashcard.question || 'No question available'}</p>
+            </div>
+            <div class="card-footer">
+              <button class="flip-btn">Show Answer</button>
+            </div>
+          </div>
+          <div class="flashcard-back">
+            <div class="card-content">
+              <h3>Answer</h3>
+              <p class="card-text">${flashcard.answer || 'No answer available'}</p>
+            </div>
+            <div class="card-footer">
+              <div class="tags-container">
+                ${flashcard.tags && flashcard.tags.length ? 
+                  flashcard.tags.map(tag => `<span class="tag">${tag}</span>`).join('') : 
+                  ''}
+              </div>
+              <button class="flip-btn">Show Question</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    `;
     
     // Add flip functionality
     const flipButtons = cardElement.querySelectorAll('.flip-btn');
@@ -582,6 +583,7 @@ document.addEventListener('DOMContentLoaded', function() {
     if (flipButtons && cardInner) {
       flipButtons.forEach(button => {
         button.addEventListener('click', () => {
+          console.log('Flipping card');
           cardInner.classList.toggle('flipped');
         });
       });
@@ -590,6 +592,7 @@ document.addEventListener('DOMContentLoaded', function() {
     // Clear container and add card
     flashcardsContainer.innerHTML = '';
     flashcardsContainer.appendChild(cardElement);
+    console.log('Flashcard displayed successfully');
   }
   
   // Flashcard Navigation
@@ -635,6 +638,13 @@ document.addEventListener('DOMContentLoaded', function() {
   
   // Show Quiz Question
   function showQuizQuestion() {
+    if (!quizzes || quizzes.length === 0 || currentQuizIndex >= quizzes.length) {
+      console.error('No quiz questions available or invalid index');
+      return;
+    }
+    
+    console.log(`Showing quiz question ${currentQuizIndex + 1}/${quizzes.length}`);
+    
     // Hide feedback and reset state
     quizFeedback.classList.add('hidden');
     quizAnswered = false;
@@ -650,12 +660,22 @@ document.addEventListener('DOMContentLoaded', function() {
     const quiz = quizzes[currentQuizIndex];
     
     // Set question
-    quizQuestion.textContent = quiz.question;
+    quizQuestion.textContent = quiz.question || 'No question available';
     quizProgress.textContent = `Question ${currentQuizIndex + 1} of ${quizzes.length}`;
     
     // Create options
     quizOptions.innerHTML = '';
-    quiz.options.forEach((option, index) => {
+    
+    // Make sure quiz.options is an array
+    const options = Array.isArray(quiz.options) ? quiz.options : [];
+    
+    if (options.length === 0) {
+      console.error('No options available for this quiz question');
+      quizOptions.innerHTML = '<div class="error-message">No options available for this question</div>';
+      return;
+    }
+    
+    options.forEach((option, index) => {
       const optionElement = document.createElement('div');
       optionElement.className = 'quiz-option';
       optionElement.textContent = option;
@@ -679,6 +699,8 @@ document.addEventListener('DOMContentLoaded', function() {
       
       quizOptions.appendChild(optionElement);
     });
+    
+    console.log('Quiz question displayed successfully');
   }
   
   // Check Answer
@@ -687,7 +709,18 @@ document.addEventListener('DOMContentLoaded', function() {
     
     quizAnswered = true;
     const quiz = quizzes[currentQuizIndex];
-    const correctOption = quiz.answer;
+    
+    // Determine the correct answer - handle both string and number index
+    let correctOption;
+    if (typeof quiz.correctAnswer === 'number' && quiz.options && quiz.options[quiz.correctAnswer]) {
+      correctOption = quiz.options[quiz.correctAnswer];
+    } else if (typeof quiz.answer === 'string') {
+      correctOption = quiz.answer;
+    } else {
+      console.error('Could not determine correct answer');
+      correctOption = selectedOption; // Fallback to avoid errors
+    }
+    
     const isCorrect = selectedOption === correctOption;
     
     // Show feedback

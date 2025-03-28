@@ -1463,39 +1463,57 @@ const auth = async (req, res, next) => {
           return res.status(400).json({ error: 'No content available to generate flashcards' });
         }
         
-        // Generate flashcards using our robust AI response function
+        // Generate flashcards using our robust AI response function with improved prompt
         const prompt = `
-          Generate 10 flashcards from the following content. 
-          Each flashcard should have a question and an answer.
-          Format the output as a JSON array of objects, each with 'question' and 'answer' properties.
-          Make the questions challenging but concise.
+          Generate 10 high-quality flashcards from the following content.
+          Each flashcard should have a question on one side and the answer on the other side.
+          
+          Requirements:
+          1. Make questions challenging but clear
+          2. Ensure answers are comprehensive but concise
+          3. Cover the most important concepts from the content
+          4. Vary the question types (definitions, explanations, applications, etc.)
+          
+          Format the output as a JSON array of objects with this exact structure:
+          [
+            {
+              "question": "What is X?",
+              "answer": "X is Y",
+              "tags": ["concept", "definition"]
+            },
+            ...more flashcards
+          ]
           
           Content:
           ${contentText.substring(0, Math.min(contentText.length, 10000))}
         `;
         
         const response = await getAIResponse(prompt, {
-          temperature: 0.7,
+          temperature: 0.5,
           maxOutputTokens: 2048
         });
         
         const responseText = response.text;
+        console.log('AI Response received for flashcards');
         
         // Parse the response to extract the JSON
         let flashcardsJson;
         try {
           // Find JSON in the response
-          const jsonMatch = responseText.match(/\[\s*\{.*\}\s*\]/s);
+          const jsonMatch = responseText.match(/\[\s*\{[\s\S]*\}\s*\]/);
           
           if (jsonMatch) {
+            console.log('JSON pattern found in response');
             flashcardsJson = JSON.parse(jsonMatch[0]);
           } else {
             // Try to parse the entire response as JSON
+            console.log('Trying to parse entire response as JSON');
             flashcardsJson = JSON.parse(responseText);
           }
           
           // Validate the structure
           if (!Array.isArray(flashcardsJson)) {
+            console.error('Response is not an array:', typeof flashcardsJson);
             throw new Error('Response is not an array');
           }
           
@@ -1507,12 +1525,17 @@ const auth = async (req, res, next) => {
           );
           
           if (flashcardsJson.length === 0) {
+            console.error('No valid flashcards found after filtering');
             throw new Error('No valid flashcards found');
           }
+          
+          console.log(`Successfully parsed ${flashcardsJson.length} flashcards`);
         } catch (parseError) {
           console.error('Error parsing flashcards JSON:', parseError);
+          console.log('Raw response:', responseText);
           
           // Fallback: Extract Q&A pairs manually
+          console.log('Attempting fallback extraction of Q&A pairs');
           const pairs = responseText.split(/\n\s*\n/).filter(p => p.trim());
           flashcardsJson = [];
           
@@ -1523,17 +1546,21 @@ const auth = async (req, res, next) => {
             if (qMatch && aMatch) {
               flashcardsJson.push({
                 question: qMatch[1].trim(),
-                answer: aMatch[1].trim()
+                answer: aMatch[1].trim(),
+                tags: []
               });
             }
           }
           
           if (flashcardsJson.length === 0) {
+            console.error('Fallback extraction failed to find any Q&A pairs');
             return res.status(500).json({ 
               error: 'Failed to parse flashcards', 
               message: 'The AI generated an invalid response format'
             });
           }
+          
+          console.log(`Fallback extraction found ${flashcardsJson.length} flashcards`);
         }
         
         // Save flashcards to the database
@@ -1590,38 +1617,58 @@ const auth = async (req, res, next) => {
           return res.status(400).json({ error: 'No content available to generate quiz' });
         }
         
-        // Generate quiz using our robust AI response function
+        // Generate quiz using our robust AI response function with improved prompt
         const prompt = `
-          Generate a quiz with 5 multiple-choice questions from the following content.
-          Each question should have 4 options (A, B, C, D) with one correct answer.
-          Format the output as a JSON array of objects, each with 'question', 'options' (array of 4 strings), and 'correctAnswer' (index 0-3) properties.
+          Create a comprehensive quiz with 5 multiple-choice questions based on the following content.
+          
+          Requirements:
+          1. Each question should test understanding of key concepts
+          2. Provide 4 options for each question (labeled A, B, C, D)
+          3. Ensure only one option is correct
+          4. Include a brief explanation for why the answer is correct
+          5. Vary the difficulty level across questions
+          
+          Format the output as a JSON array of objects with this exact structure:
+          [
+            {
+              "question": "What is X?",
+              "options": ["Option A", "Option B", "Option C", "Option D"],
+              "answer": "Option B",
+              "explanation": "Option B is correct because..."
+            },
+            ...more questions
+          ]
           
           Content:
           ${contentText.substring(0, Math.min(contentText.length, 10000))}
         `;
         
         const response = await getAIResponse(prompt, {
-          temperature: 0.7,
+          temperature: 0.5,
           maxOutputTokens: 2048
         });
         
         const responseText = response.text;
+        console.log('AI Response received for quiz');
         
         // Parse the response to extract the JSON
         let quizJson;
         try {
           // Find JSON in the response
-          const jsonMatch = responseText.match(/\[\s*\{.*\}\s*\]/s);
+          const jsonMatch = responseText.match(/\[\s*\{[\s\S]*\}\s*\]/);
           
           if (jsonMatch) {
+            console.log('JSON pattern found in response');
             quizJson = JSON.parse(jsonMatch[0]);
           } else {
             // Try to parse the entire response as JSON
+            console.log('Trying to parse entire response as JSON');
             quizJson = JSON.parse(responseText);
           }
           
           // Validate the structure
           if (!Array.isArray(quizJson)) {
+            console.error('Response is not an array:', typeof quizJson);
             throw new Error('Response is not an array');
           }
           
@@ -1630,34 +1677,19 @@ const auth = async (req, res, next) => {
             q && typeof q === 'object' && 
             typeof q.question === 'string' && 
             Array.isArray(q.options) && 
-            q.options.length === 4 &&
-            (typeof q.correctAnswer === 'number' || typeof q.correctAnswer === 'string')
+            q.options.length > 0 &&
+            typeof q.answer === 'string'
           );
           
-          // Normalize correctAnswer to be a number
-          quizJson = quizJson.map(q => {
-            if (typeof q.correctAnswer === 'string') {
-              // Handle letter answers (A, B, C, D)
-              const index = q.correctAnswer.toUpperCase().charCodeAt(0) - 65;
-              if (index >= 0 && index <= 3) {
-                q.correctAnswer = index;
-              } else {
-                // Try to parse as number
-                q.correctAnswer = parseInt(q.correctAnswer, 10);
-                // Ensure it's in range
-                if (isNaN(q.correctAnswer) || q.correctAnswer < 0 || q.correctAnswer > 3) {
-                  q.correctAnswer = 0;
-                }
-              }
-            }
-            return q;
-          });
-          
           if (quizJson.length === 0) {
+            console.error('No valid quiz questions found after filtering');
             throw new Error('No valid quiz questions found');
           }
+          
+          console.log(`Successfully parsed ${quizJson.length} quiz questions`);
         } catch (parseError) {
           console.error('Error parsing quiz JSON:', parseError);
+          console.log('Raw response:', responseText);
           return res.status(500).json({ 
             error: 'Failed to parse quiz', 
             message: 'The AI generated an invalid response format'
@@ -1720,11 +1752,13 @@ const processTextContent = async (text, sessionId, metadata = {}, userId = null)
       // Process content in parallel with Gemini
       console.log('🧠 Starting Gemini processing...');
       
-      // Generate summary
+      // Generate summary with improved prompt
       const summaryPrompt = `
-        Summarize the following content in a comprehensive way. 
-        Capture the main points and key details.
-        Focus on the most important information.
+        Create a comprehensive and detailed summary of the following content. 
+        Focus on capturing all key points, main ideas, and important details.
+        Organize the summary in a structured way with clear sections.
+        Use bullet points for important facts where appropriate.
+        Ensure the summary is informative and useful for study purposes.
         
         Content:
         ${text}
@@ -1732,7 +1766,7 @@ const processTextContent = async (text, sessionId, metadata = {}, userId = null)
       
       // Generate response using our robust AI response function
       const summaryResponse = await getAIResponse(summaryPrompt, {
-        temperature: 0.3, // Lower temperature for more factual summary
+        temperature: 0.2, // Lower temperature for more factual summary
         maxOutputTokens: 2048
       });
       
@@ -1766,7 +1800,19 @@ const processTextContent = async (text, sessionId, metadata = {}, userId = null)
           
           if (existingContent) {
             // Update existing document
-            Object.assign(existingContent, contentObj);
+            existingContent.title = contentObj.title;
+            existingContent.text = contentObj.text;
+            existingContent.summary = contentObj.summary;
+            existingContent.metadata = contentObj.metadata;
+            
+            // Only update these if they're not already set
+            if (!existingContent.flashcards || existingContent.flashcards.length === 0) {
+              existingContent.flashcards = contentObj.flashcards;
+            }
+            if (!existingContent.quizzes || existingContent.quizzes.length === 0) {
+              existingContent.quizzes = contentObj.quizzes;
+            }
+            
             await existingContent.save();
             console.log('✅ Updated existing content in database with sessionId:', sessionId);
           } else {
