@@ -26,12 +26,70 @@ const getValidMongoDBURI = (uri) => {
   
   // Check if URI already has the correct format
   if (uri.startsWith('mongodb://') || uri.startsWith('mongodb+srv://')) {
-    return uri;
+    // For URIs with the correct protocol, let's make sure the password is properly encoded
+    try {
+      // Parse the URI to identify username, password and host
+      const uriParts = uri.split('://')[1];
+      const authAndRest = uriParts.split('@');
+      
+      // If there's no @ sign or multiple @ signs, it's a malformed URI
+      if (authAndRest.length !== 2) {
+        throw new Error('Malformed MongoDB URI');
+      }
+      
+      const auth = authAndRest[0];
+      const rest = authAndRest[1];
+      
+      // Split auth into username and password
+      const authParts = auth.split(':');
+      if (authParts.length !== 2) {
+        throw new Error('Malformed authentication in MongoDB URI');
+      }
+      
+      const username = authParts[0];
+      const password = authParts[1];
+      
+      // Encode the password - this handles special characters that might cause issues
+      const encodedPassword = encodeURIComponent(password);
+      
+      // Reconstruct the URI with encoded password
+      return `mongodb${uri.startsWith('mongodb+srv') ? '+srv' : ''}://${username}:${encodedPassword}@${rest}`;
+    } catch (error) {
+      console.error('Error processing MongoDB URI:', error.message);
+      // Return the original URI if we can't parse it
+      return uri;
+    }
   }
   
   // Try to format the URI if it's missing the protocol
   if (uri.includes('@') && (uri.includes('.mongodb.net') || uri.includes('.mongo.cosmos'))) {
-    return `mongodb+srv://${uri}`;
+    // Similar process for URIs without protocol
+    try {
+      const authAndRest = uri.split('@');
+      if (authAndRest.length !== 2) {
+        throw new Error('Malformed MongoDB URI');
+      }
+      
+      const auth = authAndRest[0];
+      const rest = authAndRest[1];
+      
+      const authParts = auth.split(':');
+      if (authParts.length !== 2) {
+        throw new Error('Malformed authentication in MongoDB URI');
+      }
+      
+      const username = authParts[0];
+      const password = authParts[1];
+      
+      // Encode the password
+      const encodedPassword = encodeURIComponent(password);
+      
+      // Reconstruct the URI with encoded password
+      const protocol = uri.includes('.mongodb.net') ? 'mongodb+srv' : 'mongodb';
+      return `${protocol}://${username}:${encodedPassword}@${rest}`;
+    } catch (error) {
+      console.error('Error processing MongoDB URI:', error.message);
+    }
   }
   
   console.error('Invalid MongoDB URI format, unable to automatically correct');
