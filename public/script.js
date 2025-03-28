@@ -645,6 +645,8 @@ document.addEventListener('DOMContentLoaded', function() {
   
   // Update Quiz UI
   function updateQuizUI() {
+    console.log('updateQuizUI called with quizzes:', quizzes);
+    
     if (!quizzes || quizzes.length === 0) {
       console.log('No quizzes available to display');
       quizContainer.innerHTML = '<div class="no-content-message">No quiz available. Upload a document or enter text first.</div>';
@@ -660,11 +662,31 @@ document.addEventListener('DOMContentLoaded', function() {
     // Show quiz content and hide no-content message
     const noContentMessage = document.querySelector('#quiz-container .no-content-message');
     if (noContentMessage) {
+      console.log('Hiding no-content message');
       noContentMessage.classList.add('hidden');
+    } else {
+      console.log('No content message element not found');
     }
     
     // Make sure quiz content is visible
-    quizContent.classList.remove('hidden');
+    if (quizContent) {
+      console.log('Making quiz content visible');
+      quizContent.classList.remove('hidden');
+      quizContent.style.display = 'block'; // Force display
+    } else {
+      console.error('Quiz content element not found!');
+      console.log('quizContent:', quizContent);
+      // Try to find it again
+      const quizContentElement = document.getElementById('quiz-content');
+      if (quizContentElement) {
+        console.log('Found quiz content by ID');
+        quizContent = quizContentElement;
+        quizContent.classList.remove('hidden');
+        quizContent.style.display = 'block';
+      } else {
+        console.error('Could not find quiz content element by ID either!');
+      }
+    }
     
     // Start quiz
     showQuizQuestion();
@@ -674,6 +696,9 @@ document.addEventListener('DOMContentLoaded', function() {
   
   // Show Quiz Question
   function showQuizQuestion() {
+    console.log('showQuizQuestion called, currentQuizIndex:', currentQuizIndex);
+    console.log('quizzes array:', quizzes);
+    
     if (!quizzes || quizzes.length === 0 || currentQuizIndex >= quizzes.length) {
       console.error('No quiz questions available or invalid index');
       return;
@@ -694,7 +719,14 @@ document.addEventListener('DOMContentLoaded', function() {
     quizResults.classList.add('hidden');
     
     const quiz = quizzes[currentQuizIndex];
-    console.log('Current quiz question:', quiz);
+    console.log('Current quiz question object:', quiz);
+    
+    // Check if quiz question has required properties
+    if (!quiz || typeof quiz !== 'object') {
+      console.error('Invalid quiz question object:', quiz);
+      quizQuestion.textContent = 'Error: Invalid quiz question format';
+      return;
+    }
     
     // Set question
     quizQuestion.textContent = quiz.question || 'No question available';
@@ -705,6 +737,7 @@ document.addEventListener('DOMContentLoaded', function() {
     
     // Make sure quiz.options is an array
     const options = Array.isArray(quiz.options) ? quiz.options : [];
+    console.log('Quiz options:', options);
     
     if (options.length === 0) {
       console.error('No options available for this quiz question');
@@ -715,6 +748,7 @@ document.addEventListener('DOMContentLoaded', function() {
     console.log(`Adding ${options.length} options to the quiz question`);
     
     options.forEach((option, index) => {
+      console.log(`Creating option ${index}: ${option}`);
       const optionElement = document.createElement('div');
       optionElement.className = 'quiz-option';
       optionElement.textContent = option;
@@ -722,6 +756,8 @@ document.addEventListener('DOMContentLoaded', function() {
       
       optionElement.addEventListener('click', () => {
         if (quizAnswered) return;
+        
+        console.log(`Option selected: ${option}`);
         
         // Remove selection from all options
         quizOptions.querySelectorAll('.quiz-option').forEach(opt => {
@@ -741,6 +777,14 @@ document.addEventListener('DOMContentLoaded', function() {
     
     // Make sure the quiz options container is visible
     quizOptions.classList.remove('hidden');
+    quizOptions.style.display = 'grid'; // Force display as grid
+    
+    // Verify DOM elements are visible
+    console.log('Quiz question element visibility:', {
+      question: quizQuestion.offsetParent !== null,
+      options: quizOptions.offsetParent !== null,
+      nextButton: quizNextBtn.offsetParent !== null
+    });
     
     console.log('Quiz question displayed successfully');
   }
@@ -1715,12 +1759,12 @@ document.addEventListener('DOMContentLoaded', function() {
         // Get response as text first
         const responseText = await response.text();
         console.log('Quiz generation response received');
-        console.log('Raw response:', responseText.substring(0, 200) + '...'); // Log first 200 chars
+        console.log('Raw response:', responseText); // Log full response for debugging
         
         try {
           // Try to parse as JSON
           data = JSON.parse(responseText);
-          console.log('Quiz data parsed successfully');
+          console.log('Quiz data parsed successfully:', data); // Log full parsed data
         } catch (parseError) {
           console.error('JSON parsing error:', parseError);
           console.log('Raw response:', responseText);
@@ -1738,12 +1782,15 @@ document.addEventListener('DOMContentLoaded', function() {
       // Update quiz
       if (data.quiz && Array.isArray(data.quiz)) {
         console.log(`Received ${data.quiz.length} quiz questions`);
+        console.log('Quiz data structure:', JSON.stringify(data.quiz, null, 2)); // Log full quiz data structure
+        
         quizzes = data.quiz;
         currentQuizIndex = 0;
         correctAnswers = 0;
         
         // Ensure all quiz questions have the required properties
         quizzes = quizzes.map(q => {
+          console.log('Processing quiz question:', q); // Log each question being processed
           // Make sure each question has the correct structure
           return {
             question: q.question || 'Question not available',
@@ -1754,19 +1801,30 @@ document.addEventListener('DOMContentLoaded', function() {
         });
         
         // Filter out any invalid questions
-        quizzes = quizzes.filter(q => q.options.length > 0 && q.answer);
+        quizzes = quizzes.filter(q => {
+          const isValid = q.options.length > 0 && q.answer;
+          if (!isValid) {
+            console.warn('Filtered out invalid quiz question:', q);
+          }
+          return isValid;
+        });
         
         if (quizzes.length === 0) {
           throw new Error('No valid quiz questions were generated');
         }
         
-        updateQuizUI();
+        console.log('Final processed quizzes:', quizzes); // Log final processed quiz data
+        
+        // Force the quiz tab to be visible first
+        document.querySelector('[data-tab="quiz-tab"]').click();
+        
+        // Then update the UI with a slight delay to ensure DOM is ready
+        setTimeout(() => {
+          updateQuizUI();
+        }, 100);
         
         // Show notification
         showNotification(`Quiz generated successfully with ${quizzes.length} questions!`, 'success');
-        
-        // Switch to Quiz tab
-        document.querySelector('[data-tab="quiz-tab"]').click();
       } else {
         console.error('Invalid quiz data received:', data);
         throw new Error('Invalid quiz data received from server');
