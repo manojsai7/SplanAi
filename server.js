@@ -21,10 +21,50 @@ const PDFDocument = require('pdfkit');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// =================== FILE UPLOAD CONFIGURATION ===================
+
 // Configure multer for file uploads
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    const uploadDir = path.join(__dirname, 'uploads');
+    // Create directory if it doesn't exist
+    if (!fs.existsSync(uploadDir)) {
+      fs.mkdirSync(uploadDir, { recursive: true });
+    }
+    cb(null, uploadDir);
+  },
+  filename: (req, file, cb) => {
+    // Generate unique filename with original extension
+    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+    const ext = path.extname(file.originalname);
+    cb(null, uniqueSuffix + ext);
+  }
+});
+
+// File filter to only allow certain file types
+const fileFilter = (req, file, cb) => {
+  // Accept images, PDFs, and common document formats
+  const allowedTypes = [
+    'image/jpeg', 'image/png', 'image/gif', 'image/webp', 
+    'application/pdf', 
+    'application/msword', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    'text/plain'
+  ];
+  
+  if (allowedTypes.includes(file.mimetype)) {
+    cb(null, true);
+  } else {
+    cb(new Error('Unsupported file type. Please upload an image, PDF, or document.'), false);
+  }
+};
+
+// Configure multer with storage and limits
 const upload = multer({
-  storage: multer.memoryStorage(),
-  limits: { fileSize: 20 * 1024 * 1024 } // Limit file size to 20MB
+  storage: storage,
+  fileFilter: fileFilter,
+  limits: {
+    fileSize: 10 * 1024 * 1024, // 10MB max file size
+  }
 });
 
 // Modified MongoDB Atlas Connection to use await properly
@@ -645,102 +685,228 @@ const auth = async (req, res, next) => {
     });
     
     // Content Routes
-    // Process file upload
-    app.post('/api/process', upload.single('file'), async (req, res) => {
+    // Route to handle file uploads and OCR processing
+    app.post('/api/upload', upload.single('file'), async (req, res) => {
+      console.log('📄 File upload request received');
+      
       try {
+        // Check if MongoDB is connected
+        if (mongoose.connection.readyState !== 1) {
+          console.warn('⚠️ File upload attempted before MongoDB connection is ready');
+          return res.status(503).json({ 
+            error: 'Database connection not ready',
+            message: 'The server database is currently connecting. Please try again in a moment.'
+          });
+        }
+        
+        // Check if file was uploaded
         if (!req.file) {
           return res.status(400).json({ error: 'No file uploaded' });
         }
         
-        // Get user ID if authenticated
-        const userId = req.session?.userId || null;
+        console.log(`📄 File uploaded: ${req.file.originalname} (${req.file.size} bytes)`);
         
-        const sessionId = uuidv4();
-        const fileType = req.file.mimetype;
+        // Generate a unique session ID if not provided
+        const sessionId = req.body.sessionId || uuidv4();
         
-        console.log(`Processing uploaded file: ${fileType}`);
-        
-        // First check if MongoDB is connected before proceeding
-        if (mongoose.connection.readyState !== 1) {
-          console.warn('MongoDB not connected during file processing');
-        }
-        
-        const result = await processContent(req.file.buffer, sessionId, fileType, userId);
-        
-        // Send a more complete response with all necessary data
-        res.json({ 
-          sessionId, 
-          title: result.title || 'Untitled Document',
-          summary: result.summary,
-          flashcards: result.flashcards,
-          quizzes: result.quizzes,
-          originalText: result.originalText,
-          message: 'File processed successfully' 
-        });
-      } catch (error) {
-        console.error('Error processing file:', error);
-        res.status(500).json({ 
-          error: 'Failed to process file',
-          details: process.env.NODE_ENV === 'development' ? error.message : undefined
-        });
-      }
-    });
-    
-    // Process direct text input
-    app.post('/api/process-text', async (req, res) => {
-      try {
-        const { text, title } = req.body;
-        
-        if (!text || typeof text !== 'string' || text.trim().length === 0) {
-          return res.status(400).json({ error: 'Text input is required' });
-        }
-        
-        // Get user ID if authenticated
-        const userId = req.session?.userId || null;
-        
-        const sessionId = uuidv4();
-        console.log(`Processing direct text input, length: ${text.length}`);
-        
-        // First check if MongoDB is connected before proceeding
-        if (mongoose.connection.readyState !== 1) {
-          console.warn('MongoDB not connected during text processing');
-        }
-        
+        // Extract file metadata
         const metadata = {
-          contentType: 'text',
-          source: 'direct-input',
-          title: title && title.trim() ? title.trim() : undefined
+          originalName: req.file.originalname,
+          mimeType: req.file.mimetype,
+          size: req.file.size,
+          uploadedAt: new Date(),
+          title: req.body.title || req.file.originalname,
         };
         
-        const result = await processTextContent(text, sessionId, metadata, userId);
+        // Get user ID if authenticated
+        const userId = req.user ? req.user._id : null;
         
-        // Return the processed data
-        res.json({ 
-          sessionId,
-          title: result.title || 'Untitled Document',
-          summary: result.summary,
-          flashcards: result.flashcards,
-          quizzes: result.quizzes,
-          message: 'Text processed successfully'
-        });
+        // Process file based on type
+        let textContent = '';
+        
+        // Handle different file types
+        if (req.file.mimetype.startsWith('image/')) {
+          // Process image with OCR
+          console.log('🔍 Processing image with OCR...');
+          
+          try {
+            // Initialize Google Cloud Vision client
+            const visionClient = new vision.ImageAnnotatorClient(
+              process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON ? 
+              { credentials: JSON.parse(process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON) } : 
+              {}
+            );
+            
+            // Perform OCR on the image
+            const [result] = await visionClient.textDetection(req.file.path);
+            const detections = result.textAnnotations;
+            
+            if (detections && detections.length > 0) {
+              textContent = detections[0].description;
+              console.log(`✅ OCR successful: extracted ${textContent.length} characters`);
+            } else {
+              console.log('⚠️ No text detected in the image');
+              textContent = '';
+            }
+          } catch (ocrError) {
+            console.error('❌ OCR Error:', ocrError);
+            return res.status(500).json({ 
+              error: 'OCR processing failed', 
+              message: `Could not extract text from the image: ${ocrError.message}`,
+              sessionId 
+            });
+          }
+        } else if (req.file.mimetype === 'application/pdf') {
+          // Process PDF
+          console.log('📄 Processing PDF document...');
+          
+          try {
+            // Use pdf-parse to extract text
+            const dataBuffer = fs.readFileSync(req.file.path);
+            const pdfData = await pdfParse(dataBuffer);
+            textContent = pdfData.text;
+            console.log(`✅ PDF processing successful: extracted ${textContent.length} characters`);
+          } catch (pdfError) {
+            console.error('❌ PDF Processing Error:', pdfError);
+            return res.status(500).json({ 
+              error: 'PDF processing failed', 
+              message: `Could not extract text from the PDF: ${pdfError.message}`,
+              sessionId 
+            });
+          }
+        } else if (req.file.mimetype === 'text/plain') {
+          // Process plain text file
+          console.log('📝 Processing text file...');
+          try {
+            textContent = fs.readFileSync(req.file.path, 'utf8');
+            console.log(`✅ Text file processing successful: extracted ${textContent.length} characters`);
+          } catch (textError) {
+            console.error('❌ Text File Processing Error:', textError);
+            return res.status(500).json({ 
+              error: 'Text file processing failed', 
+              message: `Could not read the text file: ${textError.message}`,
+              sessionId 
+            });
+          }
+        } else {
+          // For other document types, we could add more processors here
+          return res.status(400).json({ 
+            error: 'Unsupported file type', 
+            message: 'This file type is not currently supported for processing.',
+            sessionId 
+          });
+        }
+        
+        // Check if we have text content to process
+        if (!textContent || textContent.trim().length === 0) {
+          return res.status(400).json({ 
+            error: 'No text content', 
+            message: 'No text could be extracted from the uploaded file.',
+            sessionId 
+          });
+        }
+        
+        // Process the extracted text content
+        try {
+          console.log('🧠 Processing extracted text content...');
+          const processedContent = await processTextContent(textContent, sessionId, metadata, userId);
+          
+          // Clean up the temporary file
+          fs.unlink(req.file.path, (err) => {
+            if (err) console.error('❌ Error deleting temporary file:', err);
+          });
+          
+          // Return the processed content
+          return res.status(200).json({
+            message: 'File processed successfully',
+            sessionId,
+            content: processedContent
+          });
+        } catch (processingError) {
+          console.error('❌ Text Processing Error:', processingError);
+          return res.status(500).json({ 
+            error: 'Text processing failed', 
+            message: `Could not process the extracted text: ${processingError.message}`,
+            sessionId 
+          });
+        }
       } catch (error) {
-        console.error('Error processing text:', error);
-        res.status(500).json({ 
-          error: 'Failed to process text',
-          details: process.env.NODE_ENV === 'development' ? error.message : undefined
+        console.error('❌ File Upload Error:', error);
+        return res.status(500).json({ 
+          error: 'File upload failed', 
+          message: error.message 
         });
       }
     });
     
-    // Get content by sessionId
-    app.get('/api/content/:sessionId', async (req, res) => {
+    // Route to handle direct text input
+    app.post('/api/process-text', async (req, res) => {
+      console.log('📝 Text processing request received');
+      
       try {
-        const { sessionId } = req.params;
-        
-        if (!sessionId) {
-          return res.status(400).json({ error: 'Session ID is required' });
+        // Check if MongoDB is connected
+        if (mongoose.connection.readyState !== 1) {
+          console.warn('⚠️ Text processing attempted before MongoDB connection is ready');
+          return res.status(503).json({ 
+            error: 'Database connection not ready',
+            message: 'The server database is currently connecting. Please try again in a moment.'
+          });
         }
         
+        // Extract text from request
+        const { text, title, sessionId: requestedSessionId } = req.body;
+        
+        // Validate text input
+        if (!text || typeof text !== 'string' || text.trim().length === 0) {
+          return res.status(400).json({ error: 'No text provided' });
+        }
+        
+        // Generate a unique session ID if not provided
+        const sessionId = requestedSessionId || uuidv4();
+        
+        // Get user ID if authenticated
+        const userId = req.user ? req.user._id : null;
+        
+        // Create metadata
+        const metadata = {
+          source: 'direct-input',
+          title: title || 'User Input',
+          createdAt: new Date()
+        };
+        
+        // Process the text
+        try {
+          console.log('🧠 Processing direct text input...');
+          const processedContent = await processTextContent(text, sessionId, metadata, userId);
+          
+          // Return the processed content
+          return res.status(200).json({
+            message: 'Text processed successfully',
+            sessionId,
+            content: processedContent
+          });
+        } catch (processingError) {
+          console.error('❌ Text Processing Error:', processingError);
+          return res.status(500).json({ 
+            error: 'Text processing failed', 
+            message: `Could not process the text: ${processingError.message}`,
+            sessionId 
+          });
+        }
+      } catch (error) {
+        console.error('❌ Text Processing Error:', error);
+        return res.status(500).json({ 
+          error: 'Text processing failed', 
+          message: error.message 
+        });
+      }
+    });
+    
+    // Route to retrieve content by session ID
+    app.get('/api/content/:sessionId', async (req, res) => {
+      console.log(`🔍 Content retrieval request for session: ${req.params.sessionId}`);
+      
+      try {
         // Check if MongoDB is connected
         if (mongoose.connection.readyState !== 1) {
           console.warn('⚠️ Content retrieval attempted before MongoDB connection is ready');
@@ -750,114 +916,281 @@ const auth = async (req, res, next) => {
           });
         }
         
+        const { sessionId } = req.params;
+        
+        if (!sessionId) {
+          return res.status(400).json({ error: 'Session ID is required' });
+        }
+        
+        // Find content by session ID
         const content = await Content.findOne({ sessionId });
         
         if (!content) {
-          return res.status(404).json({ error: 'Content not found' });
+          return res.status(404).json({ 
+            error: 'Content not found',
+            message: `No content found for session ID: ${sessionId}`
+          });
         }
         
-        res.json({ 
-          sessionId,
-          title: content.title || 'Untitled Document',
-          summary: content.summary,
-          flashcards: content.flashcards || [],
-          quizzes: content.quizzes || [],
-          originalText: content.originalText
+        // Return the content
+        return res.status(200).json({
+          message: 'Content retrieved successfully',
+          content
         });
       } catch (error) {
-        console.error('Error retrieving content:', error);
-        res.status(500).json({ 
+        console.error('❌ Content Retrieval Error:', error);
+        return res.status(500).json({ 
           error: 'Failed to retrieve content',
-          details: process.env.NODE_ENV === 'development' ? error.message : undefined
+          message: error.message
         });
       }
     });
-    
+
+    // Route to list all content for a user (requires authentication)
+    app.get('/api/content', auth, async (req, res) => {
+      console.log('📋 Content list request received');
+      
+      try {
+        // Check if MongoDB is connected
+        if (mongoose.connection.readyState !== 1) {
+          console.warn('⚠️ Content list retrieval attempted before MongoDB connection is ready');
+          return res.status(503).json({ 
+            error: 'Database connection not ready',
+            message: 'The server database is currently connecting. Please try again in a moment.'
+          });
+        }
+        
+        // Get user ID from authenticated request
+        const userId = req.user._id;
+        
+        if (!userId) {
+          return res.status(401).json({ 
+            error: 'Authentication required',
+            message: 'You must be logged in to view your content list'
+          });
+        }
+        
+        // Find all content for this user, sorted by most recent first
+        const contentList = await Content.find({ userId })
+          .sort({ 'metadata.processedAt': -1 })
+          .select('sessionId title metadata.processedAt metadata.originalName');
+        
+        // Return the content list
+        return res.status(200).json({
+          message: 'Content list retrieved successfully',
+          count: contentList.length,
+          contentList
+        });
+      } catch (error) {
+        console.error('❌ Content List Retrieval Error:', error);
+        return res.status(500).json({ 
+          error: 'Failed to retrieve content list',
+          message: error.message
+        });
+      }
+    });
+
+    // Route to delete content by session ID (requires authentication)
+    app.delete('/api/content/:sessionId', auth, async (req, res) => {
+      console.log(`🗑️ Content deletion request for session: ${req.params.sessionId}`);
+      
+      try {
+        // Check if MongoDB is connected
+        if (mongoose.connection.readyState !== 1) {
+          console.warn('⚠️ Content deletion attempted before MongoDB connection is ready');
+          return res.status(503).json({ 
+            error: 'Database connection not ready',
+            message: 'The server database is currently connecting. Please try again in a moment.'
+          });
+        }
+        
+        const { sessionId } = req.params;
+        const userId = req.user._id;
+        
+        if (!sessionId) {
+          return res.status(400).json({ error: 'Session ID is required' });
+        }
+        
+        // Find content by session ID and ensure it belongs to the user
+        const content = await Content.findOne({ sessionId, userId });
+        
+        if (!content) {
+          return res.status(404).json({ 
+            error: 'Content not found',
+            message: `No content found for session ID: ${sessionId} or you don't have permission to delete it`
+          });
+        }
+        
+        // Delete the content
+        await Content.deleteOne({ _id: content._id });
+        
+        // Return success
+        return res.status(200).json({
+          message: 'Content deleted successfully',
+          sessionId
+        });
+      } catch (error) {
+        console.error('❌ Content Deletion Error:', error);
+        return res.status(500).json({ 
+          error: 'Failed to delete content',
+          message: error.message
+        });
+      }
+    });
+
     // Chatbot API endpoint
     app.post('/api/chatbot', async (req, res) => {
+      console.log('💬 Chatbot request received');
+      
       try {
-        const { message, sessionId } = req.body;
+        // Check if MongoDB is connected
+        if (mongoose.connection.readyState !== 1) {
+          console.warn('⚠️ Chatbot request attempted before MongoDB connection is ready');
+          return res.status(503).json({ 
+            error: 'Database connection not ready',
+            message: 'The server database is currently connecting. Please try again in a moment.'
+          });
+        }
         
-        if (!message) {
+        // Extract data from request
+        const { message, sessionId: requestedSessionId, history = [] } = req.body;
+        
+        // Validate message
+        if (!message || typeof message !== 'string' || message.trim().length === 0) {
           return res.status(400).json({ error: 'Message is required' });
         }
         
-        // Use Gemini model for chatbot functionality
-        const model = genAI.getGenerativeModel({ model: "gemini-pro" });
+        // Generate a unique session ID if not provided
+        const sessionId = requestedSessionId || uuidv4();
         
-        // Prepare chat history if available
-        let chatHistory = [];
-        if (sessionId && mongoose.connection.readyState === 1) {
-          try {
-            const history = await ChatHistory.findOne({ sessionId });
-            if (history && history.messages) {
-              // Convert to format Gemini can use
-              chatHistory = history.messages.map(msg => ({
-                role: msg.role === 'assistant' ? 'model' : 'user',
-                parts: [{ text: msg.content }]
-              }));
+        // Get user ID if authenticated
+        const userId = req.user ? req.user._id : null;
+        
+        try {
+          console.log('🧠 Processing chatbot request...');
+          
+          // Get the Gemini Pro model
+          const model = genAI.getGenerativeModel({ model: "gemini-pro" });
+          
+          // Find content by session ID if available
+          let contentContext = '';
+          let title = '';
+          
+          if (sessionId) {
+            try {
+              const content = await Content.findOne({ sessionId });
+              if (content) {
+                contentContext = content.summary || '';
+                title = content.title || '';
+                console.log(`📄 Found content for session: ${title}`);
+              }
+            } catch (contentError) {
+              console.error('❌ Error retrieving content for chatbot:', contentError);
+              // Continue without content context
             }
-          } catch (historyError) {
-            console.error('Error retrieving chat history:', historyError);
           }
-        }
-        
-        // Create the Gemini chat
-        const chat = model.startChat({
-          history: chatHistory.length > 0 ? chatHistory : [
-            {
-              role: "model",
-              parts: [{ 
-                text: `I am a helpful study assistant for SplanAI, an app that helps students learn from their notes, documents, and images.
-                SplanAI can create summaries, flashcards, and quizzes from uploaded content.
-                I'll be friendly, concise, and helpful. If I don't know something, I'll suggest using the app's features instead.
-                I'll keep responses under 150 words to fit nicely in the chat interface.`
-              }]
+          
+          // Prepare chat history for Gemini
+          const chatHistory = [];
+          
+          // Add previous messages to chat history
+          if (Array.isArray(history) && history.length > 0) {
+            for (const item of history) {
+              if (item.role === 'user' && item.content) {
+                chatHistory.push({ role: 'user', parts: [{ text: item.content }] });
+              } else if (item.role === 'assistant' && item.content) {
+                chatHistory.push({ role: 'model', parts: [{ text: item.content }] });
+              }
             }
-          ],
-          generationConfig: {
-            temperature: 0.7,
-            maxOutputTokens: 300
           }
-        });
-        
-        // Send the message and get a response
-        const result = await chat.sendMessage(message);
-        const reply = result.response.text();
-        
-        // Save chat history if connected to database and sessionId provided
-        if (mongoose.connection.readyState === 1 && sessionId) {
-          try {
-            // Find or create a chat history document
-            await ChatHistory.findOneAndUpdate(
-              { sessionId },
-              { 
-                $push: { 
-                  messages: [
-                    { role: 'user', content: message },
-                    { role: 'assistant', content: reply }
-                  ]
-                },
-                $setOnInsert: { createdAt: new Date() },
-                $set: { updatedAt: new Date() }
-              },
-              { upsert: true, new: true }
-            );
-          } catch (dbError) {
-            console.error('Error saving chat history:', dbError);
+          
+          // Create system prompt with content context if available
+          let systemPrompt = 'You are an AI assistant for a document analysis application called SplanAI. Your role is to help users understand their documents and answer questions about the content.';
+          
+          if (contentContext) {
+            systemPrompt += `\n\nHere is a summary of the document being discussed:\n${contentContext}\n\nPlease use this information to provide helpful responses about the document.`;
           }
+          
+          // Add system prompt to chat history
+          chatHistory.unshift({ role: 'user', parts: [{ text: systemPrompt }] });
+          chatHistory.unshift({ role: 'model', parts: [{ text: 'I understand. I\'ll help the user with their document and answer their questions based on the content.' }] });
+          
+          // Add current message to chat history
+          chatHistory.push({ role: 'user', parts: [{ text: message }] });
+          
+          // Create chat session
+          const chat = model.startChat({
+            history: chatHistory,
+            generationConfig: {
+              temperature: 0.7,
+              topP: 0.8,
+              topK: 40,
+              maxOutputTokens: 1024,
+            },
+          });
+          
+          // Generate response
+          console.log('⏳ Generating chatbot response...');
+          const result = await chat.sendMessage(message);
+          const response = result.response;
+          const responseText = response.text();
+          
+          console.log(`✅ Chatbot response generated (${responseText.length} characters)`);
+          
+          // Save chat history to database if user is authenticated
+          if (userId) {
+            try {
+              // Find existing chat or create new one
+              let chatSession = await Chat.findOne({ sessionId, userId });
+              
+              if (!chatSession) {
+                chatSession = new Chat({
+                  sessionId,
+                  userId,
+                  title: title || 'Chat Session',
+                  history: []
+                });
+              }
+              
+              // Add new messages to history
+              chatSession.history.push({ role: 'user', content: message });
+              chatSession.history.push({ role: 'assistant', content: responseText });
+              
+              // Update last activity
+              chatSession.lastActivity = new Date();
+              
+              // Save chat session
+              await chatSession.save();
+              console.log('✅ Chat history saved to database');
+            } catch (chatSaveError) {
+              console.error('❌ Error saving chat history:', chatSaveError);
+              // Continue without saving chat history
+            }
+          }
+          
+          // Return the response
+          return res.status(200).json({
+            message: 'Chatbot response generated successfully',
+            sessionId,
+            response: responseText
+          });
+        } catch (aiError) {
+          console.error('❌ Chatbot AI Error:', aiError);
+          return res.status(500).json({ 
+            error: 'Chatbot processing failed', 
+            message: `Could not generate a response: ${aiError.message}`,
+            sessionId 
+          });
         }
-        
-        res.json({ reply });
       } catch (error) {
-        console.error('Chatbot error:', error);
-        res.status(500).json({ 
-          error: 'Error processing your message',
-          details: process.env.NODE_ENV === 'development' ? error.message : undefined
+        console.error('❌ Chatbot Error:', error);
+        return res.status(500).json({ 
+          error: 'Chatbot request failed', 
+          message: error.message 
         });
       }
     });
-    
+
     // Catch-all route for SPA in production
     if (process.env.NODE_ENV === 'production') {
       app.get('*', (req, res) => {
@@ -885,75 +1218,130 @@ const processTextContent = async (text, sessionId, metadata = {}, userId = null)
     }
     
     const fullText = text.trim();
+    console.log(`🔍 Processing text content (${fullText.length} characters)`);
     
     // AI Processing with Google Generative AI
-    console.log(' Processing with Google Generative AI, text length:', fullText.length);
-    
     try {
       // Get the Gemini Pro model
       const model = genAI.getGenerativeModel({ model: "gemini-pro" });
       
       // Process content in parallel with Gemini
-      console.log('Starting Gemini processing...');
+      console.log('🧠 Starting Gemini processing...');
       
-      // Generate summary
-      const summaryPrompt = `Summarize this in three paragraphs:\n${fullText.substring(0, Math.min(fullText.length, 15000))}`;
-      const summaryResult = await model.generateContent(summaryPrompt);
+      // Generate summary - with better prompt
+      const summaryPrompt = `
+      I need you to create a concise but comprehensive summary of the following text.
+      Focus on the main ideas, key arguments, and important details.
+      Format the summary in 3-4 clear paragraphs with proper spacing.
+      Text to summarize:
+      ${fullText.substring(0, Math.min(fullText.length, 10000))}
+      `;
+      
+      // Generate flashcards - with better prompt
+      const flashcardsPrompt = `
+      Create 5 high-quality flashcards from this text. Each flashcard should have:
+      1. A clear, concise question that tests understanding of a key concept
+      2. A comprehensive answer that fully explains the concept
+      3. A confidence score (0.0-1.0) representing how important this concept is
+      4. Relevant tags (2-3 words) that categorize this flashcard
+      
+      Format your response as a valid JSON array like this:
+      [
+        {
+          "question": "What is photosynthesis?",
+          "answer": "The process by which plants convert light energy into chemical energy.",
+          "confidence": 0.95,
+          "tags": ["biology", "plants", "energy"]
+        }
+      ]
+      
+      Text to create flashcards from:
+      ${fullText.substring(0, Math.min(fullText.length, 10000))}
+      `;
+      
+      // Generate quizzes - with better prompt
+      const quizzesPrompt = `
+      Create 3 multiple-choice quiz questions based on this text. Each question should:
+      1. Test understanding of an important concept from the text
+      2. Have 4 options (A, B, C, D) with only one correct answer
+      3. Include a brief explanation of why the answer is correct
+      
+      Format your response as a valid JSON array like this:
+      [
+        {
+          "question": "What is the capital of France?",
+          "options": ["London", "Berlin", "Paris", "Madrid"],
+          "answer": "Paris",
+          "explanation": "Paris is the capital and largest city of France."
+        }
+      ]
+      
+      Text to create quiz questions from:
+      ${fullText.substring(0, Math.min(fullText.length, 10000))}
+      `;
+      
+      // Execute all three AI calls in parallel for better performance
+      console.log('⏳ Executing parallel AI requests...');
+      const [summaryResult, flashcardsResult, quizzesResult] = await Promise.all([
+        model.generateContent(summaryPrompt),
+        model.generateContent(flashcardsPrompt),
+        model.generateContent(quizzesPrompt)
+      ]);
+      
+      // Extract text from responses
       const summary = summaryResult.response.text();
-      
-      // Generate flashcards
-      const flashcardsPrompt = `Generate 5 flashcards from this text in the following JSON format:
-      [
-        {
-          "question": "Question here?",
-          "answer": "Answer here",
-          "confidence": 0.9,
-          "tags": ["tag1", "tag2"]
-        }
-      ]
-      Text: ${fullText.substring(0, Math.min(fullText.length, 15000))}`;
-      
-      const flashcardsResult = await model.generateContent(flashcardsPrompt);
       const flashcardsText = flashcardsResult.response.text();
-      
-      // Generate quizzes
-      const quizzesPrompt = `Generate 3 multiple-choice questions with answers from this text in the following format:
-      [
-        {
-          "question": "Question text here?",
-          "options": ["Option A", "Option B", "Option C", "Option D"],
-          "answer": "Option A",
-          "explanation": "Brief explanation here"
-        }
-      ]
-      Text: ${fullText.substring(0, Math.min(fullText.length, 15000))}`;
-      
-      const quizzesResult = await model.generateContent(quizzesPrompt);
       const quizzesText = quizzesResult.response.text();
       
-      console.log(' AI processing completed successfully');
+      console.log('✅ AI processing completed successfully');
       
-      // Parse JSON responses with error handling
+      // Parse JSON responses with robust error handling
       let flashcards = [];
       let quizzes = [];
       
       try {
-        // Parse JSON responses with error handling
-        flashcards = JSON.parse(extractJSONFromString(flashcardsText)) || [];
-        quizzes = JSON.parse(extractJSONFromString(quizzesText)) || [];
+        // Extract and parse JSON for flashcards
+        const flashcardsJson = extractJSONFromString(flashcardsText);
+        console.log('Extracted flashcards JSON:', flashcardsJson.substring(0, 100) + '...');
+        flashcards = JSON.parse(flashcardsJson);
         
-        // Validate the arrays
-        if (!Array.isArray(flashcards)) flashcards = [];
-        if (!Array.isArray(quizzes)) quizzes = [];
-      } catch (jsonError) {
-        console.error('Error parsing AI response JSON:', jsonError);
-        // Create fallback content if parsing fails
-        flashcards = [{ question: "What is this text about?", answer: "Unable to generate specific flashcards", confidence: 0.5, tags: ["general"] }];
+        // Validate flashcards structure
+        if (!Array.isArray(flashcards)) {
+          console.error('Flashcards is not an array, resetting to empty array');
+          flashcards = [];
+        } else {
+          console.log(`Successfully parsed ${flashcards.length} flashcards`);
+        }
+      } catch (flashcardsError) {
+        console.error('Error parsing flashcards JSON:', flashcardsError);
+        flashcards = [{ 
+          question: "What is the main topic of this text?", 
+          answer: "This is a generated flashcard because there was an error processing the original content.", 
+          confidence: 0.5, 
+          tags: ["error", "fallback", "general"] 
+        }];
+      }
+      
+      try {
+        // Extract and parse JSON for quizzes
+        const quizzesJson = extractJSONFromString(quizzesText);
+        console.log('Extracted quizzes JSON:', quizzesJson.substring(0, 100) + '...');
+        quizzes = JSON.parse(quizzesJson);
+        
+        // Validate quizzes structure
+        if (!Array.isArray(quizzes)) {
+          console.error('Quizzes is not an array, resetting to empty array');
+          quizzes = [];
+        } else {
+          console.log(`Successfully parsed ${quizzes.length} quizzes`);
+        }
+      } catch (quizzesError) {
+        console.error('Error parsing quizzes JSON:', quizzesError);
         quizzes = [{ 
-          question: "What is the main topic discussed?", 
+          question: "What is the main topic discussed in this text?", 
           options: ["Topic A", "Topic B", "Topic C", "Cannot determine"], 
           answer: "Cannot determine", 
-          explanation: "Unable to generate specific questions from the text."
+          explanation: "This is a generated quiz question because there was an error processing the original content."
         }];
       }
       
@@ -972,7 +1360,7 @@ const processTextContent = async (text, sessionId, metadata = {}, userId = null)
         }
       }
       
-      // Create result object
+      // Create result object with all the processed data
       const contentData = {
         sessionId,
         title,
@@ -1003,27 +1391,29 @@ const processTextContent = async (text, sessionId, metadata = {}, userId = null)
             // Update existing document
             Object.assign(existingContent, contentData);
             await existingContent.save();
-            console.log('Updated existing content in database with sessionId:', sessionId);
+            console.log('✅ Updated existing content in database with sessionId:', sessionId);
           } else {
             // Create new document
             await Content.create(contentData);
-            console.log('Created new content in database with sessionId:', sessionId);
+            console.log('✅ Created new content in database with sessionId:', sessionId);
           }
         } catch (dbError) {
-          console.error('Error saving to database:', dbError);
+          console.error('❌ Error saving to database:', dbError);
           // Continue with the processing even if DB save fails
         }
       } else {
-        console.log('Database not connected, skipping save');
+        console.log('⚠️ Database not connected, skipping save');
       }
       
+      // Log success and return the data
+      console.log(`✅ Successfully processed text: ${title} (${sessionId})`);
       return contentData;
     } catch (aiError) {
-      console.error('AI Processing Error:', aiError);
+      console.error('❌ AI Processing Error:', aiError);
       throw new Error(`Advanced content processing failed: ${aiError.message}`);
     }
   } catch (err) {
-    console.error('Error processing text:', err);
+    console.error('❌ Error processing text:', err);
     throw err;
   }
 };
@@ -1105,6 +1495,72 @@ const processContent = async (buffer, sessionId, fileType, userId = null) => {
     throw err;
   }
 };
+
+// Helper function to extract JSON from a string that might contain markdown or other text
+function extractJSONFromString(str) {
+  try {
+    // First try to parse the entire string as JSON
+    try {
+      JSON.parse(str);
+      return str; // If it parses successfully, return the original string
+    } catch (e) {
+      // Not valid JSON, continue with extraction
+    }
+
+    // Look for JSON array pattern with regex
+    const jsonArrayRegex = /\[\s*\{[\s\S]*\}\s*\]/g;
+    const arrayMatches = str.match(jsonArrayRegex);
+    
+    if (arrayMatches && arrayMatches.length > 0) {
+      // Try each match until we find valid JSON
+      for (const match of arrayMatches) {
+        try {
+          JSON.parse(match);
+          return match; // Return the first valid JSON array
+        } catch (e) {
+          // Not valid JSON, try next match
+        }
+      }
+    }
+    
+    // Look for JSON between triple backticks (markdown code blocks)
+    const codeBlockRegex = /```(?:json)?\s*([\s\S]*?)```/g;
+    const codeMatches = [...str.matchAll(codeBlockRegex)];
+    
+    if (codeMatches && codeMatches.length > 0) {
+      for (const match of codeMatches) {
+        const potentialJson = match[1].trim();
+        try {
+          JSON.parse(potentialJson);
+          return potentialJson; // Return the first valid JSON from code blocks
+        } catch (e) {
+          // Not valid JSON, try next match
+        }
+      }
+    }
+    
+    // Last resort: try to find anything that looks like JSON array
+    const startIdx = str.indexOf('[');
+    const endIdx = str.lastIndexOf(']');
+    
+    if (startIdx !== -1 && endIdx !== -1 && startIdx < endIdx) {
+      const potentialJson = str.substring(startIdx, endIdx + 1);
+      try {
+        JSON.parse(potentialJson);
+        return potentialJson;
+      } catch (e) {
+        // Not valid JSON
+      }
+    }
+    
+    // If all else fails, return a valid empty array
+    console.error('Could not extract valid JSON, returning empty array');
+    return '[]';
+  } catch (err) {
+    console.error('Error in JSON extraction:', err);
+    return '[]';
+  }
+}
 
 // =================== MIDDLEWARE ===================
 
@@ -1571,85 +2027,153 @@ app.get('/api/content/:sessionId/download/flashcards', async (req, res) => {
 
 // Chatbot API endpoint
 app.post('/api/chatbot', async (req, res) => {
+  console.log('💬 Chatbot request received');
+  
   try {
-    const { message, sessionId } = req.body;
+    // Check if MongoDB is connected
+    if (mongoose.connection.readyState !== 1) {
+      console.warn('⚠️ Chatbot request attempted before MongoDB connection is ready');
+      return res.status(503).json({ 
+        error: 'Database connection not ready',
+        message: 'The server database is currently connecting. Please try again in a moment.'
+      });
+    }
     
-    if (!message) {
+    // Extract data from request
+    const { message, sessionId: requestedSessionId, history = [] } = req.body;
+    
+    // Validate message
+    if (!message || typeof message !== 'string' || message.trim().length === 0) {
       return res.status(400).json({ error: 'Message is required' });
     }
     
-    // Use Gemini model for chatbot functionality
-    const model = genAI.getGenerativeModel({ model: "gemini-pro" });
+    // Generate a unique session ID if not provided
+    const sessionId = requestedSessionId || uuidv4();
     
-    // Prepare chat history if available
-    let chatHistory = [];
-    if (sessionId && mongoose.connection.readyState === 1) {
-      try {
-        const history = await ChatHistory.findOne({ sessionId });
-        if (history && history.messages) {
-          // Convert to format Gemini can use
-          chatHistory = history.messages.map(msg => ({
-            role: msg.role === 'assistant' ? 'model' : 'user',
-            parts: [{ text: msg.content }]
-          }));
+    // Get user ID if authenticated
+    const userId = req.user ? req.user._id : null;
+    
+    try {
+      console.log('🧠 Processing chatbot request...');
+      
+      // Get the Gemini Pro model
+      const model = genAI.getGenerativeModel({ model: "gemini-pro" });
+      
+      // Find content by session ID if available
+      let contentContext = '';
+      let title = '';
+      
+      if (sessionId) {
+        try {
+          const content = await Content.findOne({ sessionId });
+          if (content) {
+            contentContext = content.summary || '';
+            title = content.title || '';
+            console.log(`📄 Found content for session: ${title}`);
+          }
+        } catch (contentError) {
+          console.error('❌ Error retrieving content for chatbot:', contentError);
+          // Continue without content context
         }
-      } catch (historyError) {
-        console.error('Error retrieving chat history:', historyError);
       }
-    }
-    
-    // Create the Gemini chat
-    const chat = model.startChat({
-      history: chatHistory.length > 0 ? chatHistory : [
-        {
-          role: "model",
-          parts: [{ 
-            text: `I am a helpful study assistant for SplanAI, an app that helps students learn from their notes, documents, and images.
-            SplanAI can create summaries, flashcards, and quizzes from uploaded content.
-            I'll be friendly, concise, and helpful. If I don't know something, I'll suggest using the app's features instead.
-            I'll keep responses under 150 words to fit nicely in the chat interface.`
-          }]
+      
+      // Prepare chat history for Gemini
+      const chatHistory = [];
+      
+      // Add previous messages to chat history
+      if (Array.isArray(history) && history.length > 0) {
+        for (const item of history) {
+          if (item.role === 'user' && item.content) {
+            chatHistory.push({ role: 'user', parts: [{ text: item.content }] });
+          } else if (item.role === 'assistant' && item.content) {
+            chatHistory.push({ role: 'model', parts: [{ text: item.content }] });
+          }
         }
-      ],
-      generationConfig: {
-        temperature: 0.7,
-        maxOutputTokens: 300
       }
-    });
-    
-    // Send the message and get a response
-    const result = await chat.sendMessage(message);
-    const reply = result.response.text();
-    
-    // Save chat history if connected to database and sessionId provided
-    if (mongoose.connection.readyState === 1 && sessionId) {
-      try {
-        // Find or create a chat history document
-        await ChatHistory.findOneAndUpdate(
-          { sessionId },
-          { 
-            $push: { 
-              messages: [
-                { role: 'user', content: message },
-                { role: 'assistant', content: reply }
-              ]
-            },
-            $setOnInsert: { createdAt: new Date() },
-            $set: { updatedAt: new Date() }
-          },
-          { upsert: true, new: true }
-        );
-      } catch (dbError) {
-        console.error('Error saving chat history:', dbError);
+      
+      // Create system prompt with content context if available
+      let systemPrompt = 'You are an AI assistant for a document analysis application called SplanAI. Your role is to help users understand their documents and answer questions about the content.';
+      
+      if (contentContext) {
+        systemPrompt += `\n\nHere is a summary of the document being discussed:\n${contentContext}\n\nPlease use this information to provide helpful responses about the document.`;
       }
+      
+      // Add system prompt to chat history
+      chatHistory.unshift({ role: 'user', parts: [{ text: systemPrompt }] });
+      chatHistory.unshift({ role: 'model', parts: [{ text: 'I understand. I\'ll help the user with their document and answer their questions based on the content.' }] });
+      
+      // Add current message to chat history
+      chatHistory.push({ role: 'user', parts: [{ text: message }] });
+      
+      // Create chat session
+      const chat = model.startChat({
+        history: chatHistory,
+        generationConfig: {
+          temperature: 0.7,
+          topP: 0.8,
+          topK: 40,
+          maxOutputTokens: 1024,
+        },
+      });
+      
+      // Generate response
+      console.log('⏳ Generating chatbot response...');
+      const result = await chat.sendMessage(message);
+      const response = result.response;
+      const responseText = response.text();
+      
+      console.log(`✅ Chatbot response generated (${responseText.length} characters)`);
+      
+      // Save chat history to database if user is authenticated
+      if (userId) {
+        try {
+          // Find existing chat or create new one
+          let chatSession = await Chat.findOne({ sessionId, userId });
+          
+          if (!chatSession) {
+            chatSession = new Chat({
+              sessionId,
+              userId,
+              title: title || 'Chat Session',
+              history: []
+            });
+          }
+          
+          // Add new messages to history
+          chatSession.history.push({ role: 'user', content: message });
+          chatSession.history.push({ role: 'assistant', content: responseText });
+          
+          // Update last activity
+          chatSession.lastActivity = new Date();
+          
+          // Save chat session
+          await chatSession.save();
+          console.log('✅ Chat history saved to database');
+        } catch (chatSaveError) {
+          console.error('❌ Error saving chat history:', chatSaveError);
+          // Continue without saving chat history
+        }
+      }
+      
+      // Return the response
+      return res.status(200).json({
+        message: 'Chatbot response generated successfully',
+        sessionId,
+        response: responseText
+      });
+    } catch (aiError) {
+      console.error('❌ Chatbot AI Error:', aiError);
+      return res.status(500).json({ 
+        error: 'Chatbot processing failed', 
+        message: `Could not generate a response: ${aiError.message}`,
+        sessionId 
+      });
     }
-    
-    res.json({ reply });
   } catch (error) {
-    console.error('Chatbot error:', error);
-    res.status(500).json({ 
-      error: 'Error processing your message',
-      details: process.env.NODE_ENV === 'development' ? error.message : undefined
+    console.error('❌ Chatbot Error:', error);
+    return res.status(500).json({ 
+      error: 'Chatbot request failed', 
+      message: error.message 
     });
   }
 });
@@ -1669,71 +2193,4 @@ if (process.env.NODE_ENV === 'production') {
   app.get('/', (req, res) => {
     res.sendFile(path.join(__dirname, 'public', 'index.html'));
   });
-}
-
-// Helper function to extract JSON from a string that might contain other text
-function extractJSONFromString(str) {
-  try {
-    // If it's already valid JSON, return it
-    try {
-      JSON.parse(str);
-      return str;
-    } catch (e) {
-      // Continue with extraction
-    }
-    
-    // Find the first occurrence of '[' or '{'
-    const firstBracketIndex = str.indexOf('[');
-    const firstBraceIndex = str.indexOf('{');
-    
-    let startIndex;
-    let endIndex;
-    let openChar;
-    let closeChar;
-    
-    // Determine which comes first: [ or {
-    if (firstBracketIndex !== -1 && (firstBraceIndex === -1 || firstBracketIndex < firstBraceIndex)) {
-      startIndex = firstBracketIndex;
-      openChar = '[';
-      closeChar = ']';
-    } else if (firstBraceIndex !== -1) {
-      startIndex = firstBraceIndex;
-      openChar = '{';
-      closeChar = '}';
-    } else {
-      // No JSON found
-      return '[]';
-    }
-    
-    // Find the matching closing bracket/brace
-    let count = 1;
-    let i = startIndex + 1;
-    
-    while (count > 0 && i < str.length) {
-      if (str[i] === openChar) count++;
-      else if (str[i] === closeChar) count--;
-      i++;
-    }
-    
-    if (count === 0) {
-      endIndex = i;
-      // Extract the JSON string
-      const jsonStr = str.substring(startIndex, endIndex);
-      
-      // Validate it's valid JSON
-      try {
-        JSON.parse(jsonStr);
-        return jsonStr;
-      } catch (e) {
-        console.error('Extracted string is not valid JSON:', e);
-        return openChar === '[' ? '[]' : '{}';
-      }
-    }
-    
-    // If we couldn't find matching brackets/braces, return a default empty array or object
-    return openChar === '[' ? '[]' : '{}';
-  } catch (error) {
-    console.error('JSON extraction error:', error);
-    return '[]';
-  }
 }
