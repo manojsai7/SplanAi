@@ -5,6 +5,7 @@
  * It will:
  * 1. Format MongoDB connection strings correctly with proper encoding
  * 2. Format Google Cloud credentials for Heroku environment variables
+ * 3. Provide guidance on MongoDB Atlas IP whitelisting
  * 
  * Run this script with Node.js:
  * node heroku-env-helper.js
@@ -80,9 +81,11 @@ function showMainMenu() {
   console.log('\n=== Heroku Environment Variable Helper ===\n');
   console.log('1. Format MongoDB Connection String');
   console.log('2. Format Google Cloud Credentials');
-  console.log('3. Exit');
+  console.log('3. MongoDB Atlas IP Whitelist Guide');
+  console.log('4. Generate Heroku Config Commands');
+  console.log('5. Exit');
   
-  rl.question('\nSelect an option (1-3): ', (answer) => {
+  rl.question('\nSelect an option (1-5): ', (answer) => {
     switch (answer) {
       case '1':
         formatMongoDB();
@@ -91,6 +94,12 @@ function showMainMenu() {
         formatGoogleCreds();
         break;
       case '3':
+        showMongoDBWhitelistGuide();
+        break;
+      case '4':
+        generateHerokuConfig();
+        break;
+      case '5':
         console.log('Exiting script. Goodbye!');
         rl.close();
         break;
@@ -135,6 +144,87 @@ function formatGoogleCreds() {
     
     askContinue();
   });
+}
+
+// MongoDB IP Whitelist guide
+function showMongoDBWhitelistGuide() {
+  console.log('\n=== MongoDB Atlas IP Whitelist Guide ===\n');
+  console.log('The SSL/TLS error and IP whitelist issues are common when deploying to Heroku.');
+  console.log('\nTo fix IP whitelist issues:');
+  console.log('1. Log in to your MongoDB Atlas account');
+  console.log('2. Select your cluster');
+  console.log('3. Navigate to Network Access in the left sidebar');
+  console.log('4. Click "+ Add IP Address"');
+  console.log('5. OPTION A (Temporary): Click "Allow Access from Anywhere" to add 0.0.0.0/0');
+  console.log('   This will allow any IP to connect (use for testing only)');
+  console.log('6. OPTION B (Recommended): Add Heroku\'s IP ranges');
+  console.log('   You can find Heroku\'s current IP ranges at: https://devcenter.heroku.com/articles/heroku-cloud-ip-ranges');
+  console.log('\nNote: For a SSL/TLS error, we\'ve already added code to bypass the certificate validation.');
+  console.log('This is a workaround and not ideal for production environments with sensitive data.');
+  
+  askContinue();
+}
+
+// Generate Heroku Config Commands
+function generateHerokuConfig() {
+  console.log('\n=== Generate Heroku Config Commands ===\n');
+  console.log('This will help you generate all the config commands needed for Heroku.');
+  
+  let configVars = {};
+  
+  const askForMongo = () => {
+    rl.question('Enter your MongoDB URI: ', (uri) => {
+      if (uri) {
+        configVars.MONGODB_URI = formatMongoDBUri(uri);
+      }
+      askForOpenAI();
+    });
+  };
+  
+  const askForOpenAI = () => {
+    rl.question('Enter your OpenAI API Key: ', (key) => {
+      if (key) {
+        configVars.OPENAI_API_KEY = key;
+      }
+      askForSessionSecret();
+    });
+  };
+  
+  const askForSessionSecret = () => {
+    rl.question('Enter a session secret (or press enter to generate one): ', (secret) => {
+      if (!secret) {
+        // Generate a random string
+        const randomBytes = require('crypto').randomBytes(32);
+        secret = randomBytes.toString('hex');
+        console.log(`Generated session secret: ${secret}`);
+      }
+      configVars.SESSION_SECRET = secret;
+      askForGoogleCredentials();
+    });
+  };
+  
+  const askForGoogleCredentials = () => {
+    rl.question('Enter path to Google credentials file (or press enter to skip): ', (path) => {
+      if (path && path.trim()) {
+        const creds = formatGoogleCredentials(path.trim());
+        if (creds) {
+          configVars.GOOGLE_APPLICATION_CREDENTIALS_JSON = creds;
+        }
+      }
+      
+      // Now show all the config commands
+      console.log('\n=== Heroku Config Commands ===');
+      Object.entries(configVars).forEach(([key, value]) => {
+        console.log(`heroku config:set ${key}="${value}"`);
+      });
+      
+      console.log('\n=== Copy and run these commands in your terminal ===');
+      
+      askContinue();
+    });
+  };
+  
+  askForMongo();
 }
 
 // Ask to continue or exit

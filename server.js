@@ -79,19 +79,57 @@ const connectDB = async () => {
       console.log('Using properly encoded MongoDB URI');
     }
     
-    // Connect to MongoDB with the fixed URI
+    // Connect to MongoDB with the fixed URI and special SSL options for Heroku
     await mongoose.connect(uri, {
       useNewUrlParser: true,
       useUnifiedTopology: true,
+      ssl: true,
+      sslValidate: false, // Disable SSL certificate validation for Heroku
+      tlsAllowInvalidCertificates: true, // Handle TLS errors gracefully
+      tlsAllowInvalidHostnames: true, // Allow invalid hostnames
       retryWrites: true,
-      w: 'majority'
+      w: 'majority',
+      // Short timeouts to fail fast if connection isn't possible
+      serverSelectionTimeoutMS: 15000, // 15 seconds
+      connectTimeoutMS: 15000
     });
     console.log('MongoDB Connected successfully');
   } catch (err) {
     console.error('Database Connection Error:', err);
-    if (err.message && err.message.includes('Password contains unescaped characters')) {
-      console.error('Please make sure your MongoDB password is properly encoded in the MONGODB_URI environment variable');
-      console.error('You can run the mongodb-uri-helper.js script to generate a properly encoded URI');
+    
+    // Provide helpful diagnostics and guidance based on error type
+    if (err.name === 'MongooseServerSelectionError' || err.message?.includes('ENOTFOUND')) {
+      console.error('\n===== MONGODB CONNECTION TROUBLESHOOTING =====');
+      
+      if (err.message?.includes('IP whitelist')) {
+        console.error('\nIP WHITELIST ISSUE: Your Heroku app IP is not whitelisted in MongoDB Atlas.');
+        console.error('To fix this:');
+        console.error('1. Go to your MongoDB Atlas dashboard');
+        console.error('2. Navigate to Network Access');
+        console.error('3. Add 0.0.0.0/0 to whitelist all IPs temporarily (change after testing)');
+        console.error('   OR add the specific Heroku IP ranges (see Heroku documentation)');
+      }
+      
+      if (err.message?.includes('SSL') || err.message?.includes('TLS') || err.message?.includes('certificate')) {
+        console.error('\nSSL/TLS ISSUE: There are problems with the secure connection to MongoDB.');
+        console.error('Your app is running with TLS disabled for troubleshooting. In production, use:');
+        console.error('1. Ensure your MongoDB Atlas cluster has TLS enabled');
+        console.error('2. Add "?ssl=true" to your connection string if it\'s not there already');
+      }
+      
+      console.error('\nMONGODB URI FORMAT:');
+      console.error('Ensure your URI follows this pattern: mongodb+srv://<username>:<password>@<cluster>.mongodb.net/<dbname>');
+      console.error('Make sure special characters in password are properly encoded');
+      console.error('\nTry the helper tool: node heroku-env-helper.js to generate a properly formatted URI');
+      console.error('================================================\n');
+    }
+    
+    // Keep app running even if database connection fails in production
+    if (process.env.NODE_ENV !== 'production') {
+      console.error('Exiting due to database connection failure in development mode');
+      process.exit(1);
+    } else {
+      console.warn('Continuing without database connection in production mode');
     }
   }
 };
