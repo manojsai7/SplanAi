@@ -12,7 +12,7 @@ const MongoStore = require('connect-mongo');
 const cors = require('cors');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
-const { GoogleGenerativeAI } = require('@google/generative-ai');
+const { GoogleGenerativeAI, HarmCategory, HarmBlockThreshold } = require('@google/generative-ai');
 const { ImageAnnotatorClient } = require('@google-cloud/vision');
 const fs = require('fs');
 const fsExtra = require('fs-extra');
@@ -80,9 +80,11 @@ const connectDB = async () => {
     // 1. Get MongoDB URI from Heroku config
     let uri = process.env.MONGODB_URI;
     if (!uri) {
-      console.warn(" MONGODB_URI not set in environment variables");
+      console.error("❌ MONGODB_URI not set in environment variables");
       return false;
     }
+
+    console.log("🔍 Original MongoDB URI:", uri.replace(/mongodb\+srv:\/\/[^:]+:([^@]+)@/, "mongodb+srv://[username]:[password]@"));
 
     // 2. Encode password (fixes special characters like @, /, etc.)
     uri = uri.replace(/(mongodb\+srv:\/\/[^:]+):([^@]+)@/, (match, username, password) => {
@@ -111,6 +113,7 @@ const connectDB = async () => {
     }
     
     console.log(" Connecting to MongoDB Atlas...");
+    console.log(" Connection URI: " + uri.replace(/mongodb\+srv:\/\/[^:]+:([^@]+)@/, "mongodb+srv://[username]:[password]@"));
 
     // IMPORTANT: Configure mongoose globally before connection
     mongoose.set('bufferCommands', false); // This is critical - disable buffering to prevent waiting for connection
@@ -130,9 +133,30 @@ const connectDB = async () => {
       autoIndex: false // Don't build indexes automatically
     };
 
-    // 5. Connect to MongoDB - with proper await
-    const connection = await mongoose.connect(uri, options);
-    console.log(" MongoDB Connected Successfully!");
+    console.log(" MongoDB connection options:", JSON.stringify(options, null, 2));
+
+    // 5. Connect to MongoDB - with proper await and retry logic
+    let retries = 3;
+    let connection = null;
+    
+    while (retries > 0 && !connection) {
+      try {
+        console.log(` Attempt ${4 - retries} to connect to MongoDB...`);
+        connection = await mongoose.connect(uri, options);
+        console.log(" MongoDB Connected Successfully!");
+        break;
+      } catch (retryErr) {
+        console.error(` Connection attempt failed: ${retryErr.message}`);
+        retries--;
+        if (retries > 0) {
+          console.log(` Retrying... (${retries} attempts left)`);
+          // Wait 2 seconds before retrying
+          await new Promise(resolve => setTimeout(resolve, 2000));
+        } else {
+          throw retryErr; // Re-throw the error if we've exhausted all retries
+        }
+      }
+    }
     
     // Return the connection for further use if needed
     return connection;
@@ -142,12 +166,17 @@ const connectDB = async () => {
     // Helpful error messages
     if (err.message.includes("ENOTFOUND")) {
       console.error(" DNS Error: Check your MongoDB URI hostname!");
+      console.error(" Make sure your MongoDB Atlas cluster is running and accessible.");
     } else if (err.message.includes("SSL") || err.message.includes("TLS")) {
       console.error(" TLS/SSL Error: Try updating the connection string from MongoDB Atlas");
-      console.error("   Make sure to select Node.js driver and version 4.0 or later");
-    } else if (err.message.includes("whitelist")) {
-      console.error(" IP Whitelist Error: Add 0.0.0.0/0 to your MongoDB Atlas Network Access");
-    } 
+      console.error(" Make sure to select Node.js driver and version 4.0 or later");
+    } else if (err.message.includes("whitelist") || err.message.includes("IP address")) {
+      console.error(" IP Whitelist Error: Your current IP address is not allowed to access the database");
+      console.error(" Please add your IP address or 0.0.0.0/0 to your MongoDB Atlas Network Access settings");
+      console.error(" Go to: MongoDB Atlas Dashboard -> Network Access -> Add IP Address");
+    } else if (err.message.includes("Authentication failed")) {
+      console.error(" Authentication Error: Check your username and password in the connection string");
+    }
     
     // Return null to indicate connection failure
     return null;
@@ -288,8 +317,28 @@ const ChatHistorySchema = new mongoose.Schema({
   }
 });
 
-// Initialize the Google Generative AI client
+// Initialize Google Generative AI
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+
+// Configure Gemini safety settings
+const safetySettings = [
+  {
+    category: HarmCategory.HARM_CATEGORY_HARASSMENT,
+    threshold: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
+  },
+  {
+    category: HarmCategory.HARM_CATEGORY_HATE_SPEECH,
+    threshold: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
+  },
+  {
+    category: HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
+    threshold: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
+  },
+  {
+    category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
+    threshold: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
+  },
+];
 
 // Initialize Google Cloud Vision API client
 let visionClient;
@@ -1011,8 +1060,11 @@ const auth = async (req, res, next) => {
         try {
           console.log('🧠 Processing chatbot request...');
           
-          // Get the Gemini Pro model
-          const model = genAI.getGenerativeModel({ model: "gemini-pro" });
+          // Get the Gemini Pro model with safety settings
+          const model = genAI.getGenerativeModel({
+            model: "gemini-1.5-pro",
+            safetySettings: safetySettings
+          });
           
           // Find content by session ID if available
           let contentContext = '';
@@ -1032,20 +1084,6 @@ const auth = async (req, res, next) => {
             }
           }
           
-          // Prepare chat history for Gemini
-          const chatHistory = [];
-          
-          // Add previous messages to chat history
-          if (Array.isArray(history) && history.length > 0) {
-            for (const item of history) {
-              if (item.role === 'user' && item.content) {
-                chatHistory.push({ role: 'user', parts: [{ text: item.content }] });
-              } else if (item.role === 'assistant' && item.content) {
-                chatHistory.push({ role: 'model', parts: [{ text: item.content }] });
-              }
-            }
-          }
-          
           // Create system prompt with content context if available
           let systemPrompt = 'You are an AI assistant for a document analysis application called SplanAI. Your role is to help users understand their documents and answer questions about the content.';
           
@@ -1053,30 +1091,40 @@ const auth = async (req, res, next) => {
             systemPrompt += `\n\nHere is a summary of the document being discussed:\n${contentContext}\n\nPlease use this information to provide helpful responses about the document.`;
           }
           
-          // Add system prompt to chat history
-          chatHistory.unshift({ role: 'user', parts: [{ text: systemPrompt }] });
-          chatHistory.unshift({ role: 'model', parts: [{ text: 'I understand. I\'ll help the user with their document and answer their questions based on the content.' }] });
-          
-          // Add current message to chat history
-          chatHistory.push({ role: 'user', parts: [{ text: message }] });
-          
           try {
             // Create chat session
             const chat = model.startChat({
-              history: chatHistory,
               generationConfig: {
                 temperature: 0.7,
                 topP: 0.8,
                 topK: 40,
                 maxOutputTokens: 1024,
               },
+              history: [
+                {
+                  role: "user",
+                  parts: [{ text: systemPrompt }],
+                },
+                {
+                  role: "model",
+                  parts: [{ text: "I understand. I'll help the user with their document and answer their questions based on the content." }],
+                },
+              ],
             });
+            
+            // Add previous messages from history if available
+            if (Array.isArray(history) && history.length > 0) {
+              for (const item of history) {
+                if (item.role === 'user' && item.content) {
+                  await chat.sendMessage(item.content);
+                }
+              }
+            }
             
             // Generate response
             console.log('⏳ Generating chatbot response...');
             const result = await chat.sendMessage(message);
-            const response = result.response;
-            const responseText = response.text();
+            const responseText = result.response.text();
             
             console.log(`✅ Chatbot response generated (${responseText.length} characters)`);
             
@@ -1593,7 +1641,7 @@ app.use(helmet({
       defaultSrc: ["'self'"],
       connectSrc: ["'self'", 'https://*.googleapis.com'],
       scriptSrc: ["'self'", "'unsafe-inline'"],
-      styleSrc: ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com', 'https://cdnjs.cloudflare.com'],
+      styleSrc: ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com'],
       fontSrc: ["'self'", 'https://fonts.gstatic.com', 'https://cdnjs.cloudflare.com'],
       imgSrc: ["'self'", 'data:', 'https://cdn-icons-png.flaticon.com'],
     },
@@ -2078,8 +2126,11 @@ app.post('/api/chatbot', async (req, res) => {
     try {
       console.log('🧠 Processing chatbot request...');
       
-      // Get the Gemini Pro model
-      const model = genAI.getGenerativeModel({ model: "gemini-pro" });
+      // Get the Gemini Pro model with safety settings
+      const model = genAI.getGenerativeModel({
+        model: "gemini-1.5-pro",
+        safetySettings: safetySettings
+      });
       
       // Find content by session ID if available
       let contentContext = '';
@@ -2099,20 +2150,6 @@ app.post('/api/chatbot', async (req, res) => {
         }
       }
       
-      // Prepare chat history for Gemini
-      const chatHistory = [];
-      
-      // Add previous messages to chat history
-      if (Array.isArray(history) && history.length > 0) {
-        for (const item of history) {
-          if (item.role === 'user' && item.content) {
-            chatHistory.push({ role: 'user', parts: [{ text: item.content }] });
-          } else if (item.role === 'assistant' && item.content) {
-            chatHistory.push({ role: 'model', parts: [{ text: item.content }] });
-          }
-        }
-      }
-      
       // Create system prompt with content context if available
       let systemPrompt = 'You are an AI assistant for a document analysis application called SplanAI. Your role is to help users understand their documents and answer questions about the content.';
       
@@ -2120,30 +2157,40 @@ app.post('/api/chatbot', async (req, res) => {
         systemPrompt += `\n\nHere is a summary of the document being discussed:\n${contentContext}\n\nPlease use this information to provide helpful responses about the document.`;
       }
       
-      // Add system prompt to chat history
-      chatHistory.unshift({ role: 'user', parts: [{ text: systemPrompt }] });
-      chatHistory.unshift({ role: 'model', parts: [{ text: 'I understand. I\'ll help the user with their document and answer their questions based on the content.' }] });
-      
-      // Add current message to chat history
-      chatHistory.push({ role: 'user', parts: [{ text: message }] });
-      
       try {
         // Create chat session
         const chat = model.startChat({
-          history: chatHistory,
           generationConfig: {
             temperature: 0.7,
             topP: 0.8,
             topK: 40,
             maxOutputTokens: 1024,
           },
+          history: [
+            {
+              role: "user",
+              parts: [{ text: systemPrompt }],
+            },
+            {
+              role: "model",
+              parts: [{ text: "I understand. I'll help the user with their document and answer their questions based on the content." }],
+            },
+          ],
         });
+        
+        // Add previous messages from history if available
+        if (Array.isArray(history) && history.length > 0) {
+          for (const item of history) {
+            if (item.role === 'user' && item.content) {
+              await chat.sendMessage(item.content);
+            }
+          }
+        }
         
         // Generate response
         console.log('⏳ Generating chatbot response...');
         const result = await chat.sendMessage(message);
-        const response = result.response;
-        const responseText = response.text();
+        const responseText = result.response.text();
         
         console.log(`✅ Chatbot response generated (${responseText.length} characters)`);
         
@@ -2227,3 +2274,234 @@ if (process.env.NODE_ENV === 'production') {
     res.sendFile(path.join(__dirname, 'public', 'index.html'));
   });
 }
+
+// Generate flashcards endpoint
+app.post('/api/generate-flashcards', async (req, res) => {
+  try {
+    const { sessionId } = req.body;
+    
+    if (!sessionId) {
+      return res.status(400).json({ error: 'Session ID is required' });
+    }
+    
+    // Find content by session ID
+    const content = await Content.findOne({ sessionId });
+    
+    if (!content) {
+      return res.status(404).json({ error: 'Content not found for this session' });
+    }
+    
+    // Get the content text
+    const contentText = content.text || content.summary || '';
+    
+    if (!contentText) {
+      return res.status(400).json({ error: 'No content available to generate flashcards' });
+    }
+    
+    // Get the Gemini Pro model with safety settings
+    const model = genAI.getGenerativeModel({
+      model: "gemini-1.5-pro",
+      safetySettings: safetySettings
+    });
+    
+    // Generate flashcards
+    const prompt = `
+      Generate 10 flashcards from the following content. 
+      Each flashcard should have a question and an answer.
+      Format the output as a JSON array of objects, each with 'question' and 'answer' properties.
+      Make the questions challenging but concise.
+      
+      Content:
+      ${contentText.substring(0, 10000)} // Limit content to 10000 characters
+    `;
+    
+    const result = await model.generateContent(prompt);
+    const responseText = result.response.text();
+    
+    // Parse the response to extract the JSON
+    let flashcardsJson;
+    try {
+      // Find JSON in the response
+      const jsonMatch = responseText.match(/\[\s*\{.*\}\s*\]/s);
+      
+      if (jsonMatch) {
+        flashcardsJson = JSON.parse(jsonMatch[0]);
+      } else {
+        // Try to parse the entire response as JSON
+        flashcardsJson = JSON.parse(responseText);
+      }
+      
+      // Validate the structure
+      if (!Array.isArray(flashcardsJson)) {
+        throw new Error('Response is not an array');
+      }
+      
+      // Ensure each item has question and answer
+      flashcardsJson = flashcardsJson.filter(card => 
+        card && typeof card === 'object' && 
+        typeof card.question === 'string' && 
+        typeof card.answer === 'string'
+      );
+      
+      if (flashcardsJson.length === 0) {
+        throw new Error('No valid flashcards found');
+      }
+    } catch (parseError) {
+      console.error('Error parsing flashcards JSON:', parseError);
+      
+      // Fallback: Extract Q&A pairs manually
+      const pairs = responseText.split(/\n\s*\n/).filter(p => p.trim());
+      flashcardsJson = [];
+      
+      for (const pair of pairs) {
+        const qMatch = pair.match(/Q(?:uestion)?:?\s*(.*?)(?:\n|$)/i);
+        const aMatch = pair.match(/A(?:nswer)?:?\s*(.*?)(?:\n|$)/i);
+        
+        if (qMatch && aMatch) {
+          flashcardsJson.push({
+            question: qMatch[1].trim(),
+            answer: aMatch[1].trim()
+          });
+        }
+      }
+      
+      if (flashcardsJson.length === 0) {
+        return res.status(500).json({ 
+          error: 'Failed to parse flashcards', 
+          message: 'The AI generated an invalid response format'
+        });
+      }
+    }
+    
+    // Save flashcards to the database
+    content.flashcards = flashcardsJson;
+    await content.save();
+    
+    return res.status(200).json({ 
+      message: 'Flashcards generated successfully',
+      flashcards: flashcardsJson
+    });
+  } catch (error) {
+    console.error('Error generating flashcards:', error);
+    return res.status(500).json({ 
+      error: 'Failed to generate flashcards', 
+      message: error.message
+    });
+  }
+});
+
+// Generate quiz endpoint
+app.post('/api/generate-quiz', async (req, res) => {
+  try {
+    const { sessionId } = req.body;
+    
+    if (!sessionId) {
+      return res.status(400).json({ error: 'Session ID is required' });
+    }
+    
+    // Find content by session ID
+    const content = await Content.findOne({ sessionId });
+    
+    if (!content) {
+      return res.status(404).json({ error: 'Content not found for this session' });
+    }
+    
+    // Get the content text
+    const contentText = content.text || content.summary || '';
+    
+    if (!contentText) {
+      return res.status(400).json({ error: 'No content available to generate quiz' });
+    }
+    
+    // Get the Gemini Pro model with safety settings
+    const model = genAI.getGenerativeModel({
+      model: "gemini-1.5-pro",
+      safetySettings: safetySettings
+    });
+    
+    // Generate quiz
+    const prompt = `
+      Generate a quiz with 5 multiple-choice questions from the following content.
+      Each question should have 4 options (A, B, C, D) with one correct answer.
+      Format the output as a JSON array of objects, each with 'question', 'options' (array of 4 strings), and 'correctAnswer' (index 0-3) properties.
+      
+      Content:
+      ${contentText.substring(0, 10000)} // Limit content to 10000 characters
+    `;
+    
+    const result = await model.generateContent(prompt);
+    const responseText = result.response.text();
+    
+    // Parse the response to extract the JSON
+    let quizJson;
+    try {
+      // Find JSON in the response
+      const jsonMatch = responseText.match(/\[\s*\{.*\}\s*\]/s);
+      
+      if (jsonMatch) {
+        quizJson = JSON.parse(jsonMatch[0]);
+      } else {
+        // Try to parse the entire response as JSON
+        quizJson = JSON.parse(responseText);
+      }
+      
+      // Validate the structure
+      if (!Array.isArray(quizJson)) {
+        throw new Error('Response is not an array');
+      }
+      
+      // Ensure each item has required properties
+      quizJson = quizJson.filter(q => 
+        q && typeof q === 'object' && 
+        typeof q.question === 'string' && 
+        Array.isArray(q.options) && 
+        q.options.length === 4 &&
+        (typeof q.correctAnswer === 'number' || typeof q.correctAnswer === 'string')
+      );
+      
+      // Normalize correctAnswer to be a number
+      quizJson = quizJson.map(q => {
+        if (typeof q.correctAnswer === 'string') {
+          // Handle letter answers (A, B, C, D)
+          const index = q.correctAnswer.toUpperCase().charCodeAt(0) - 65;
+          if (index >= 0 && index <= 3) {
+            q.correctAnswer = index;
+          } else {
+            // Try to parse as number
+            q.correctAnswer = parseInt(q.correctAnswer, 10);
+            // Ensure it's in range
+            if (isNaN(q.correctAnswer) || q.correctAnswer < 0 || q.correctAnswer > 3) {
+              q.correctAnswer = 0;
+            }
+          }
+        }
+        return q;
+      });
+      
+      if (quizJson.length === 0) {
+        throw new Error('No valid quiz questions found');
+      }
+    } catch (parseError) {
+      console.error('Error parsing quiz JSON:', parseError);
+      return res.status(500).json({ 
+        error: 'Failed to parse quiz', 
+        message: 'The AI generated an invalid response format'
+      });
+    }
+    
+    // Save quiz to the database
+    content.quiz = quizJson;
+    await content.save();
+    
+    return res.status(200).json({ 
+      message: 'Quiz generated successfully',
+      quiz: quizJson
+    });
+  } catch (error) {
+    console.error('Error generating quiz:', error);
+    return res.status(500).json({ 
+      error: 'Failed to generate quiz', 
+      message: error.message
+    });
+  }
+});
