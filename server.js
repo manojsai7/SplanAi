@@ -183,6 +183,147 @@ const connectDB = async () => {
   }
 };
 
+// Initialize Google Generative AI with robust error handling
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+
+// Configure Gemini safety settings
+const safetySettings = [
+  {
+    category: HarmCategory.HARM_CATEGORY_HARASSMENT,
+    threshold: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
+  },
+  {
+    category: HarmCategory.HARM_CATEGORY_HATE_SPEECH,
+    threshold: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
+  },
+  {
+    category: HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
+    threshold: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
+  },
+  {
+    category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
+    threshold: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
+  },
+];
+
+// Robust function to get AI response with fallback to OpenAI if Gemini fails
+async function getAIResponse(prompt, options = {}) {
+  console.log('🤖 Getting AI response...');
+  
+  // Default options
+  const defaultOptions = {
+    temperature: 0.7,
+    maxOutputTokens: 1024,
+    topK: 40,
+    topP: 0.8,
+  };
+  
+  // Merge options
+  const generationConfig = { ...defaultOptions, ...options };
+  
+  // Try Gemini models in order
+  const modelVersions = [
+    "gemini-pro",  // Most widely available model
+    "gemini-1.0-pro",
+    "gemini-1.5-flash",
+    "gemini-flash"
+  ];
+  
+  // Try each model
+  for (const modelVersion of modelVersions) {
+    try {
+      console.log(`🔄 Trying model: ${modelVersion}`);
+      
+      const model = genAI.getGenerativeModel({
+        model: modelVersion,
+        safetySettings,
+        generationConfig
+      });
+      
+      const result = await model.generateContent(prompt);
+      const text = result.response.text();
+      
+      console.log(`✅ Successfully got response from ${modelVersion} (${text.length} chars)`);
+      return { text, model: modelVersion, source: 'gemini' };
+    } catch (error) {
+      console.warn(`⚠️ ${modelVersion} failed: ${error.message}`);
+      
+      // If this is a 404 error, try the next model
+      if (error.message.includes('404') || 
+          error.message.includes('not found') || 
+          error.message.includes('not supported')) {
+        continue;
+      }
+      
+      // For other errors like rate limiting, authentication, etc., don't try other models
+      throw error;
+    }
+  }
+  
+  // If we get here, all Gemini models failed with 404 errors
+  throw new Error('All Gemini models failed. Please check your API key and available models.');
+}
+
+// Function to handle chat conversations with proper history
+async function handleChatConversation(messages, options = {}) {
+  try {
+    // Try to use the most widely available model
+    const model = genAI.getGenerativeModel({
+      model: "gemini-pro",
+      safetySettings
+    });
+    
+    // Format messages for Gemini
+    const formattedHistory = messages.map(msg => {
+      return {
+        role: msg.role === 'user' ? 'user' : 'model',
+        parts: [{ text: msg.content }]
+      };
+    });
+    
+    // Create chat session
+    const chat = model.startChat({
+      generationConfig: {
+        temperature: options.temperature || 0.7,
+        topP: options.topP || 0.8,
+        topK: options.topK || 40,
+        maxOutputTokens: options.maxOutputTokens || 1024,
+      },
+      history: formattedHistory.slice(0, -1) // Exclude the last message
+    });
+    
+    // Send the last message
+    const lastMessage = messages[messages.length - 1];
+    const result = await chat.sendMessage(lastMessage.content);
+    return result.response.text();
+  } catch (error) {
+    console.error('❌ Chat conversation error:', error);
+    
+    // Fallback to simple prompt if chat fails
+    try {
+      // Combine all messages into a single prompt
+      const combinedPrompt = messages.map(msg => 
+        `${msg.role === 'user' ? 'User' : 'Assistant'}: ${msg.content}`
+      ).join('\n\n');
+      
+      const finalPrompt = `
+        The following is a conversation between a user and an AI assistant.
+        Please continue the conversation by providing the next assistant response.
+        
+        ${combinedPrompt}
+        
+        Assistant:
+      `;
+      
+      const response = await getAIResponse(finalPrompt, options);
+      return response.text;
+    } catch (fallbackError) {
+      console.error('❌ Fallback also failed:', fallbackError);
+      throw new Error(`AI service unavailable: ${error.message}`);
+    }
+  }
+}
+
 // Initialize models at global scope with null declarations
 let User = null;
 let Content = null;
@@ -316,29 +457,6 @@ const ChatHistorySchema = new mongoose.Schema({
     default: Date.now
   }
 });
-
-// Initialize Google Generative AI
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-
-// Configure Gemini safety settings
-const safetySettings = [
-  {
-    category: HarmCategory.HARM_CATEGORY_HARASSMENT,
-    threshold: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
-  },
-  {
-    category: HarmCategory.HARM_CATEGORY_HATE_SPEECH,
-    threshold: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
-  },
-  {
-    category: HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
-    threshold: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
-  },
-  {
-    category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
-    threshold: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
-  },
-];
 
 // Initialize Google Cloud Vision API client
 let visionClient;
@@ -1060,12 +1178,6 @@ const auth = async (req, res, next) => {
         try {
           console.log('🧠 Processing chatbot request...');
           
-          // Get the Gemini Pro model with safety settings
-          const model = genAI.getGenerativeModel({
-            model: "gemini-1.5-pro",
-            safetySettings: safetySettings
-          });
-          
           // Find content by session ID if available
           let contentContext = '';
           let title = '';
@@ -1092,39 +1204,33 @@ const auth = async (req, res, next) => {
           }
           
           try {
-            // Create chat session
-            const chat = model.startChat({
-              generationConfig: {
-                temperature: 0.7,
-                topP: 0.8,
-                topK: 40,
-                maxOutputTokens: 1024,
-              },
-              history: [
-                {
-                  role: "user",
-                  parts: [{ text: systemPrompt }],
-                },
-                {
-                  role: "model",
-                  parts: [{ text: "I understand. I'll help the user with their document and answer their questions based on the content." }],
-                },
-              ],
-            });
+            // Prepare messages for chat
+            const messages = [
+              { role: 'system', content: systemPrompt },
+              { role: 'assistant', content: "I understand. I'll help the user with their document and answer their questions based on the content." }
+            ];
             
             // Add previous messages from history if available
             if (Array.isArray(history) && history.length > 0) {
               for (const item of history) {
-                if (item.role === 'user' && item.content) {
-                  await chat.sendMessage(item.content);
+                if (item.role === 'user' || item.role === 'assistant') {
+                  messages.push({ 
+                    role: item.role, 
+                    content: item.content 
+                  });
                 }
               }
             }
             
-            // Generate response
+            // Add current message
+            messages.push({ role: 'user', content: message });
+            
+            // Generate response using our robust chat handler
             console.log('⏳ Generating chatbot response...');
-            const result = await chat.sendMessage(message);
-            const responseText = result.response.text();
+            const responseText = await handleChatConversation(messages, {
+              temperature: 0.7,
+              maxOutputTokens: 1024
+            });
             
             console.log(`✅ Chatbot response generated (${responseText.length} characters)`);
             
@@ -1223,163 +1329,44 @@ const processTextContent = async (text, sessionId, metadata = {}, userId = null)
     
     // AI Processing with Google Generative AI
     try {
-      // Get the Gemini Pro model
-      const model = genAI.getGenerativeModel({ model: "gemini-pro" });
-      
       // Process content in parallel with Gemini
       console.log('🧠 Starting Gemini processing...');
       
-      // Generate summary - with better prompt
+      // Generate summary
       const summaryPrompt = `
-      I need you to create a concise but comprehensive summary of the following text.
-      Focus on the main ideas, key arguments, and important details.
-      Format the summary in 3-4 clear paragraphs with proper spacing.
-      Text to summarize:
-      ${fullText.substring(0, Math.min(fullText.length, 10000))}
-      `;
-      
-      // Generate flashcards - with better prompt
-      const flashcardsPrompt = `
-      Create 5 high-quality flashcards from this text. Each flashcard should have:
-      1. A clear, concise question that tests understanding of a key concept
-      2. A comprehensive answer that fully explains the concept
-      3. A confidence score (0.0-1.0) representing how important this concept is
-      4. Relevant tags (2-3 words) that categorize this flashcard
-      
-      Format your response as a valid JSON array like this:
-      [
-        {
-          "question": "What is photosynthesis?",
-          "answer": "The process by which plants convert light energy into chemical energy.",
-          "confidence": 0.95,
-          "tags": ["biology", "plants", "energy"]
-        }
-      ]
-      
-      Text to create flashcards from:
-      ${fullText.substring(0, Math.min(fullText.length, 10000))}
-      `;
-      
-      // Generate quizzes - with better prompt
-      const quizzesPrompt = `
-      Create 3 multiple-choice quiz questions based on this text. Each question should:
-      1. Test understanding of an important concept from the text
-      2. Have 4 options (A, B, C, D) with only one correct answer
-      3. Include a brief explanation of why the answer is correct
-      
-      Format your response as a valid JSON array like this:
-      [
-        {
-          "question": "What is the capital of France?",
-          "options": ["London", "Berlin", "Paris", "Madrid"],
-          "answer": "Paris",
-          "explanation": "Paris is the capital and largest city of France."
-        }
-      ]
-      
-      Text to create quiz questions from:
-      ${fullText.substring(0, Math.min(fullText.length, 10000))}
-      `;
-      
-      // Execute all three AI calls in parallel for better performance
-      console.log('⏳ Executing parallel AI requests...');
-      const [summaryResult, flashcardsResult, quizzesResult] = await Promise.all([
-        model.generateContent(summaryPrompt),
-        model.generateContent(flashcardsPrompt),
-        model.generateContent(quizzesPrompt)
-      ]);
-      
-      // Extract text from responses
-      const summary = summaryResult.response.text();
-      const flashcardsText = flashcardsResult.response.text();
-      const quizzesText = quizzesResult.response.text();
-      
-      console.log('✅ AI processing completed successfully');
-      
-      // Parse JSON responses with robust error handling
-      let flashcards = [];
-      let quizzes = [];
-      
-      try {
-        // Extract and parse JSON for flashcards
-        const flashcardsJson = extractJSONFromString(flashcardsText);
-        console.log('Extracted flashcards JSON:', flashcardsJson.substring(0, 100) + '...');
-        flashcards = JSON.parse(flashcardsJson);
+        Summarize the following content in a comprehensive way. 
+        Capture the main points and key details.
+        Focus on the most important information.
         
-        // Validate flashcards structure
-        if (!Array.isArray(flashcards)) {
-          console.error('Flashcards is not an array, resetting to empty array');
-          flashcards = [];
-        } else {
-          console.log(`Successfully parsed ${flashcards.length} flashcards`);
-        }
-      } catch (flashcardsError) {
-        console.error('Error parsing flashcards JSON:', flashcardsError);
-        flashcards = [{ 
-          question: "What is the main topic of this text?", 
-          answer: "This is a generated flashcard because there was an error processing the original content.", 
-          confidence: 0.5, 
-          tags: ["error", "fallback", "general"] 
-        }];
-      }
+        Content:
+        ${text}
+      `;
       
-      try {
-        // Extract and parse JSON for quizzes
-        const quizzesJson = extractJSONFromString(quizzesText);
-        console.log('Extracted quizzes JSON:', quizzesJson.substring(0, 100) + '...');
-        quizzes = JSON.parse(quizzesJson);
-        
-        // Validate quizzes structure
-        if (!Array.isArray(quizzes)) {
-          console.error('Quizzes is not an array, resetting to empty array');
-          quizzes = [];
-        } else {
-          console.log(`Successfully parsed ${quizzes.length} quizzes`);
-        }
-      } catch (quizzesError) {
-        console.error('Error parsing quizzes JSON:', quizzesError);
-        quizzes = [{ 
-          question: "What is the main topic discussed in this text?", 
-          options: ["Topic A", "Topic B", "Topic C", "Cannot determine"], 
-          answer: "Cannot determine", 
-          explanation: "This is a generated quiz question because there was an error processing the original content."
-        }];
-      }
+      // Generate response using our robust AI response function
+      const summaryResponse = await getAIResponse(summaryPrompt, {
+        temperature: 0.3, // Lower temperature for more factual summary
+        maxOutputTokens: 2048
+      });
       
-      // Generate title using the AI
-      let title = metadata.title || '';
+      console.log(`✅ Generated summary (${summaryResponse.text.length} chars)`);
       
-      if (!title) {
-        try {
-          const titlePrompt = `Create a very short title (5-7 words max) for this text:\n${fullText.substring(0, Math.min(fullText.length, 1000))}`;
-          const titleResult = await model.generateContent(titlePrompt);
-          title = titleResult.response.text().trim();
-          if (!title) title = 'Untitled Document';
-        } catch (titleError) {
-          console.error('Error generating title:', titleError);
-          title = 'Untitled Document';
-        }
-      }
-      
-      // Create result object with all the processed data
-      const contentData = {
-        sessionId,
-        title,
-        originalText: fullText,
-        summary,
-        flashcards,
-        quizzes,
+      // Create content object
+      const contentObj = {
+        title: metadata.title || 'Untitled Document',
+        text: text,
+        summary: summaryResponse.text,
+        flashcards: [],
+        quizzes: [],
         metadata: {
-          ...metadata,
-          processedAt: new Date(),
-          textLength: fullText.length,
-          processingStatus: 'completed'
+          source: metadata.source || 'unknown',
+          contentType: metadata.contentType || 'text',
+          processedAt: new Date()
         }
       };
       
       // If user is authenticated, associate content with user
       if (userId) {
-        contentData.userId = userId;
+        contentObj.userId = userId;
       }
       
       // Save to database if mongoose is connected
@@ -1390,12 +1377,12 @@ const processTextContent = async (text, sessionId, metadata = {}, userId = null)
           
           if (existingContent) {
             // Update existing document
-            Object.assign(existingContent, contentData);
+            Object.assign(existingContent, contentObj);
             await existingContent.save();
             console.log('✅ Updated existing content in database with sessionId:', sessionId);
           } else {
             // Create new document
-            await Content.create(contentData);
+            await Content.create(contentObj);
             console.log('✅ Created new content in database with sessionId:', sessionId);
           }
         } catch (dbError) {
@@ -1407,8 +1394,8 @@ const processTextContent = async (text, sessionId, metadata = {}, userId = null)
       }
       
       // Log success and return the data
-      console.log(`✅ Successfully processed text: ${title} (${sessionId})`);
-      return contentData;
+      console.log(`✅ Successfully processed text: ${contentObj.title} (${sessionId})`);
+      return contentObj;
     } catch (aiError) {
       console.error('❌ AI Processing Error:', aiError);
       throw new Error(`Advanced content processing failed: ${aiError.message}`);
@@ -1632,348 +1619,249 @@ function extractJSONFromString(str) {
   }
 }
 
-// =================== MIDDLEWARE ===================
-
-// Security configuration
-app.use(helmet({
-  contentSecurityPolicy: {
-    directives: {
-      defaultSrc: ["'self'"],
-      connectSrc: ["'self'", 'https://*.googleapis.com'],
-      scriptSrc: ["'self'", "'unsafe-inline'"],
-      styleSrc: ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com'],
-      fontSrc: ["'self'", 'https://fonts.gstatic.com', 'https://cdnjs.cloudflare.com'],
-      imgSrc: ["'self'", 'data:', 'https://cdn-icons-png.flaticon.com'],
-    },
-  },
-}));
-app.use(cors({
-  origin: process.env.CLIENT_URL || '*',
-  credentials: true
-}));
-app.use(rateLimit({
-  windowMs: 15 * 60 * 1000, // Limit each IP to 100 requests per windowMs
-  max: 100
-}));
-
-// =================== API Endpoints ===================
-
-// User Authentication Routes
-// Register User
-app.post('/api/auth/register', async (req, res) => {
+// Generate flashcards endpoint
+app.post('/api/generate-flashcards', async (req, res) => {
   try {
-    // First check if MongoDB is connected
-    if (mongoose.connection.readyState !== 1) {
-      console.warn(' Registration attempted before MongoDB connection is ready');
-      // For APIs that require auth, fail with clear message
-      return res.status(503).json({ 
-        error: 'Database connection not ready',
-        message: 'The server database is currently connecting. Please try again in a moment.'
-      });
-    }
-    
-    const { username, email, password } = req.body;
-    
-    // Validate input
-    if (!username || !email || !password) {
-      return res.status(400).json({ error: 'All fields are required' });
-    }
-    
-    if (password.length < 6) {
-      return res.status(400).json({ error: 'Password must be at least 6 characters' });
-    }
-    
-    // Check if user already exists
-    const existingUser = await User.findOne({ $or: [{ email }, { username }] });
-    if (existingUser) {
-      return res.status(400).json({ error: 'User with this email or username already exists' });
-    }
-    
-    // Hash password
-    const salt = await bcrypt.genSalt(10);
-    const hashedPassword = await bcrypt.hash(password, salt);
-    
-    // Create new user
-    const user = new User({
-      username,
-      email,
-      password: hashedPassword
-    });
-    
-    await user.save();
-    
-    // Create session
-    req.session.userId = user._id;
-    
-    // Create JWT
-    const token = jwt.sign(
-      { userId: user._id }, 
-      process.env.JWT_SECRET || 'splanAI-jwt-secret',
-      { expiresIn: '7d' }
-    );
-    
-    res.status(201).json({
-      message: 'User registered successfully',
-      user: {
-        id: user._id,
-        username: user.username,
-        email: user.email
-      },
-      token
-    });
-  } catch (error) {
-    console.error('Registration error:', error);
-    res.status(500).json({ error: error.message || 'Error registering user' });
-  }
-});
-
-// Login User
-app.post('/api/auth/login', async (req, res) => {
-  try {
-    // First check if MongoDB is connected
-    if (mongoose.connection.readyState !== 1) {
-      console.warn(' Login attempted before MongoDB connection is ready');
-      // For APIs that require auth, fail with clear message
-      return res.status(503).json({ 
-        error: 'Database connection not ready',
-        message: 'The server database is currently connecting. Please try again in a moment.'
-      });
-    }
-    
-    const { email, password } = req.body;
-    
-    // Validate input
-    if (!email || !password) {
-      return res.status(400).json({ error: 'Email and password are required' });
-    }
-    
-    // Find user
-    const user = await User.findOne({ email }).select('+password');
-    if (!user) {
-      return res.status(400).json({ error: 'Invalid credentials' });
-    }
-    
-    // Verify password
-    const isMatch = await bcrypt.compare(password, user.password);
-    if (!isMatch) {
-      return res.status(400).json({ error: 'Invalid credentials' });
-    }
-    
-    // Update last login
-    user.lastLogin = new Date();
-    await user.save();
-    
-    // Create session
-    req.session.userId = user._id;
-    
-    // Create JWT
-    const token = jwt.sign(
-      { userId: user._id }, 
-      process.env.JWT_SECRET || 'splanAI-jwt-secret',
-      { expiresIn: '7d' }
-    );
-    
-    res.status(200).json({
-      message: 'Login successful',
-      user: {
-        id: user._id,
-        username: user.username,
-        email: user.email
-      },
-      token
-    });
-  } catch (error) {
-    console.error('Login error:', error);
-    res.status(500).json({ error: error.message || 'Error logging in' });
-  }
-});
-
-// Logout User
-app.post('/api/auth/logout', (req, res) => {
-  try {
-    req.session.destroy(err => {
-      if (err) {
-        return res.status(500).json({ error: 'Could not log out, please try again' });
-      }
-      res.clearCookie('connect.sid');
-      res.status(200).json({ message: 'Logged out successfully' });
-    });
-  } catch (error) {
-    console.error('Logout error:', error);
-    res.status(500).json({ error: error.message || 'Error logging out' });
-  }
-});
-
-// Get Current User
-app.get('/api/auth/me', auth, (req, res) => {
-  try {
-    res.status(200).json({
-      user: {
-        id: req.user._id,
-        username: req.user.username,
-        email: req.user.email,
-        role: req.user.role,
-        createdAt: req.user.createdAt,
-        lastLogin: req.user.lastLogin
-      }
-    });
-  } catch (error) {
-    console.error('Get user error:', error);
-    res.status(500).json({ error: error.message || 'Error getting user data' });
-  }
-});
-
-// Content Routes
-// Process file upload
-app.post('/api/process', upload.single('file'), async (req, res) => {
-  try {
-    if (!req.file) {
-      return res.status(400).json({ error: 'No file uploaded' });
-    }
-    
-    // Get user ID if authenticated
-    const userId = req.session?.userId || null;
-    
-    const sessionId = uuidv4();
-    const fileType = req.file.mimetype;
-    
-    console.log(`Processing uploaded file: ${fileType}`);
-    
-    // First check if MongoDB is connected before proceeding
-    if (mongoose.connection.readyState !== 1) {
-      console.warn('MongoDB not connected during file processing');
-    }
-    
-    const result = await processContent(req.file.buffer, sessionId, fileType, userId);
-    
-    // Send a more complete response with all necessary data
-    res.json({ 
-      sessionId, 
-      title: result.title || 'Untitled Document',
-      summary: result.summary,
-      flashcards: result.flashcards,
-      quizzes: result.quizzes,
-      originalText: result.originalText,
-      message: 'File processed successfully' 
-    });
-  } catch (error) {
-    console.error('Error processing file:', error);
-    res.status(500).json({ 
-      error: 'Failed to process file',
-      details: process.env.NODE_ENV === 'development' ? error.message : undefined
-    });
-  }
-});
-
-// Process direct text input
-app.post('/api/process-text', express.json(), async (req, res) => {
-  try {
-    const { text, title } = req.body;
-    
-    if (!text || typeof text !== 'string' || text.trim().length === 0) {
-      return res.status(400).json({ error: 'Text input is required' });
-    }
-    
-    // Get user ID if authenticated
-    const userId = req.session?.userId || null;
-    
-    const sessionId = uuidv4();
-    console.log(`Processing direct text input, length: ${text.length}`);
-    
-    // First check if MongoDB is connected before proceeding
-    if (mongoose.connection.readyState !== 1) {
-      console.warn('MongoDB not connected during text processing');
-    }
-    
-    const metadata = {
-      contentType: 'text',
-      source: 'direct-input',
-      title: title && title.trim() ? title.trim() : undefined
-    };
-    
-    const result = await processTextContent(text, sessionId, metadata, userId);
-    
-    // Return the processed data
-    res.json({ 
-      sessionId,
-      title: result.title || 'Untitled Document',
-      summary: result.summary,
-      flashcards: result.flashcards,
-      quizzes: result.quizzes,
-      message: 'Text processed successfully'
-    });
-  } catch (error) {
-    console.error('Error processing text:', error);
-    res.status(500).json({ 
-      error: 'Failed to process text',
-      details: process.env.NODE_ENV === 'development' ? error.message : undefined
-    });
-  }
-});
-
-// Get content by sessionId
-app.get('/api/content/:sessionId', async (req, res) => {
-  try {
-    const { sessionId } = req.params;
+    const { sessionId } = req.body;
     
     if (!sessionId) {
       return res.status(400).json({ error: 'Session ID is required' });
     }
     
-    // Check if MongoDB is connected
-    if (mongoose.connection.readyState !== 1) {
-      console.warn(' Content retrieval attempted before MongoDB connection is ready');
-      return res.status(503).json({ 
-        error: 'Database connection not ready',
-        message: 'The server database is currently connecting. Please try again in a moment.'
-      });
-    }
-    
+    // Find content by session ID
     const content = await Content.findOne({ sessionId });
     
     if (!content) {
-      return res.status(404).json({ error: 'Content not found' });
+      return res.status(404).json({ error: 'Content not found for this session' });
     }
     
-    res.json({ 
-      sessionId,
-      title: content.title || 'Untitled Document',
-      summary: content.summary,
-      flashcards: content.flashcards || [],
-      quizzes: content.quizzes || [],
-      originalText: content.originalText
+    // Get the content text
+    const contentText = content.text || content.summary || '';
+    
+    if (!contentText) {
+      return res.status(400).json({ error: 'No content available to generate flashcards' });
+    }
+    
+    // Generate flashcards using our robust AI response function
+    const prompt = `
+      Generate 10 flashcards from the following content. 
+      Each flashcard should have a question and an answer.
+      Format the output as a JSON array of objects, each with 'question' and 'answer' properties.
+      Make the questions challenging but concise.
+      
+      Content:
+      ${contentText.substring(0, Math.min(contentText.length, 10000))}
+    `;
+    
+    const response = await getAIResponse(prompt, {
+      temperature: 0.7,
+      maxOutputTokens: 2048
+    });
+    
+    const responseText = response.text;
+    
+    // Parse the response to extract the JSON
+    let flashcardsJson;
+    try {
+      // Find JSON in the response
+      const jsonMatch = responseText.match(/\[\s*\{.*\}\s*\]/s);
+      
+      if (jsonMatch) {
+        flashcardsJson = JSON.parse(jsonMatch[0]);
+      } else {
+        // Try to parse the entire response as JSON
+        flashcardsJson = JSON.parse(responseText);
+      }
+      
+      // Validate the structure
+      if (!Array.isArray(flashcardsJson)) {
+        throw new Error('Response is not an array');
+      }
+      
+      // Ensure each item has question and answer
+      flashcardsJson = flashcardsJson.filter(card => 
+        card && typeof card === 'object' && 
+        typeof card.question === 'string' && 
+        typeof card.answer === 'string'
+      );
+      
+      if (flashcardsJson.length === 0) {
+        throw new Error('No valid flashcards found');
+      }
+    } catch (parseError) {
+      console.error('Error parsing flashcards JSON:', parseError);
+      
+      // Fallback: Extract Q&A pairs manually
+      const pairs = responseText.split(/\n\s*\n/).filter(p => p.trim());
+      flashcardsJson = [];
+      
+      for (const pair of pairs) {
+        const qMatch = pair.match(/Q(?:uestion)?:?\s*(.*?)(?:\n|$)/i);
+        const aMatch = pair.match(/A(?:nswer)?:?\s*(.*?)(?:\n|$)/i);
+        
+        if (qMatch && aMatch) {
+          flashcardsJson.push({
+            question: qMatch[1].trim(),
+            answer: aMatch[1].trim()
+          });
+        }
+      }
+      
+      if (flashcardsJson.length === 0) {
+        return res.status(500).json({ 
+          error: 'Failed to parse flashcards', 
+          message: 'The AI generated an invalid response format'
+        });
+      }
+    }
+    
+    // Save flashcards to the database
+    content.flashcards = flashcardsJson;
+    await content.save();
+    
+    return res.status(200).json({ 
+      message: 'Flashcards generated successfully',
+      flashcards: flashcardsJson
     });
   } catch (error) {
-    console.error('Error retrieving content:', error);
-    res.status(500).json({ 
-      error: 'Failed to retrieve content',
-      details: process.env.NODE_ENV === 'development' ? error.message : undefined
+    console.error('Error generating flashcards:', error);
+    return res.status(500).json({ 
+      error: 'Failed to generate flashcards', 
+      message: error.message
     });
   }
 });
 
-// Get user's content (requires authentication)
-app.get('/api/user/content', auth, async (req, res) => {
+// Generate quiz endpoint
+app.post('/api/generate-quiz', async (req, res) => {
   try {
-    const userId = req.user._id;
+    const { sessionId } = req.body;
     
-    // Get list of user's content (just basic info, not full content)
-    const userContent = await Content.find(
-      { userId }, 
-      { 
-        title: 1, 
-        sessionId: 1, 
-        createdAt: 1, 
-        'content.metadata': 1 
+    if (!sessionId) {
+      return res.status(400).json({ error: 'Session ID is required' });
+    }
+    
+    // Find content by session ID
+    const content = await Content.findOne({ sessionId });
+    
+    if (!content) {
+      return res.status(404).json({ error: 'Content not found for this session' });
+    }
+    
+    // Get the content text
+    const contentText = content.text || content.summary || '';
+    
+    if (!contentText) {
+      return res.status(400).json({ error: 'No content available to generate quiz' });
+    }
+    
+    // Generate quiz using our robust AI response function
+    const prompt = `
+      Generate a quiz with 5 multiple-choice questions from the following content.
+      Each question should have 4 options (A, B, C, D) with one correct answer.
+      Format the output as a JSON array of objects, each with 'question', 'options' (array of 4 strings), and 'correctAnswer' (index 0-3) properties.
+      
+      Content:
+      ${contentText.substring(0, Math.min(contentText.length, 10000))}
+    `;
+    
+    const response = await getAIResponse(prompt, {
+      temperature: 0.7,
+      maxOutputTokens: 2048
+    });
+    
+    const responseText = response.text;
+    
+    // Parse the response to extract the JSON
+    let quizJson;
+    try {
+      // Find JSON in the response
+      const jsonMatch = responseText.match(/\[\s*\{.*\}\s*\]/s);
+      
+      if (jsonMatch) {
+        quizJson = JSON.parse(jsonMatch[0]);
+      } else {
+        // Try to parse the entire response as JSON
+        quizJson = JSON.parse(responseText);
       }
-    ).sort({ createdAt: -1 });
+      
+      // Validate the structure
+      if (!Array.isArray(quizJson)) {
+        throw new Error('Response is not an array');
+      }
+      
+      // Ensure each item has required properties
+      quizJson = quizJson.filter(q => 
+        q && typeof q === 'object' && 
+        typeof q.question === 'string' && 
+        Array.isArray(q.options) && 
+        q.options.length === 4 &&
+        (typeof q.correctAnswer === 'number' || typeof q.correctAnswer === 'string')
+      );
+      
+      // Normalize correctAnswer to be a number
+      quizJson = quizJson.map(q => {
+        if (typeof q.correctAnswer === 'string') {
+          // Handle letter answers (A, B, C, D)
+          const index = q.correctAnswer.toUpperCase().charCodeAt(0) - 65;
+          if (index >= 0 && index <= 3) {
+            q.correctAnswer = index;
+          } else {
+            // Try to parse as number
+            q.correctAnswer = parseInt(q.correctAnswer, 10);
+            // Ensure it's in range
+            if (isNaN(q.correctAnswer) || q.correctAnswer < 0 || q.correctAnswer > 3) {
+              q.correctAnswer = 0;
+            }
+          }
+        }
+        return q;
+      });
+      
+      if (quizJson.length === 0) {
+        throw new Error('No valid quiz questions found');
+      }
+    } catch (parseError) {
+      console.error('Error parsing quiz JSON:', parseError);
+      return res.status(500).json({ 
+        error: 'Failed to parse quiz', 
+        message: 'The AI generated an invalid response format'
+      });
+    }
     
-    res.json({ content: userContent });
+    // Save quiz to the database
+    content.quiz = quizJson;
+    await content.save();
+    
+    return res.status(200).json({ 
+      message: 'Quiz generated successfully',
+      quiz: quizJson
+    });
   } catch (error) {
-    console.error('Error retrieving user content:', error);
-    res.status(500).json({ error: error.message || 'Unknown error occurred' });
+    console.error('Error generating quiz:', error);
+    return res.status(500).json({ 
+      error: 'Failed to generate quiz', 
+      message: error.message
+    });
   }
 });
+
+// Support for both production and development environments
+if (process.env.NODE_ENV === 'production') {
+  // Serve static files from the React app
+  app.use(express.static(path.join(__dirname, 'public')));
+  
+  // For any request that doesn't match one above, send back React's index.html file
+  app.get('*', (req, res) => {
+    res.sendFile(path.join(__dirname, 'public', 'index.html'));
+  });
+} else {
+  // Development mode - serve only the API endpoints
+  app.use(express.static(path.join(__dirname, 'public')));
+  app.get('/', (req, res) => {
+    res.sendFile(path.join(__dirname, 'public', 'index.html'));
+  });
+}
 
 // Download content as PDF
 app.get('/api/content/:sessionId/download/pdf', async (req, res) => {
@@ -2092,416 +1980,5 @@ app.get('/api/content/:sessionId/download/flashcards', async (req, res) => {
   } catch (error) {
     console.error('Error generating CSV:', error);
     res.status(500).json({ error: error.message || 'Error generating CSV' });
-  }
-});
-
-// Chatbot API endpoint
-app.post('/api/chatbot', async (req, res) => {
-  console.log('💬 Chatbot request received');
-  
-  try {
-    // Check if MongoDB is connected
-    if (mongoose.connection.readyState !== 1) {
-      console.warn('⚠️ Chatbot request attempted before MongoDB connection is ready');
-      // Continue anyway - we can still process the request without DB
-    }
-    
-    // Extract data from request
-    const { message, sessionId: requestedSessionId, history = [] } = req.body;
-    
-    // Validate message
-    if (!message || typeof message !== 'string' || message.trim().length === 0) {
-      return res.status(400).json({ 
-        error: 'Message is required',
-        reply: 'I need a message to respond to. Please try again.'
-      });
-    }
-    
-    // Generate a unique session ID if not provided
-    const sessionId = requestedSessionId || uuidv4();
-    
-    // Get user ID if authenticated
-    const userId = req.user ? req.user._id : null;
-    
-    try {
-      console.log('🧠 Processing chatbot request...');
-      
-      // Get the Gemini Pro model with safety settings
-      const model = genAI.getGenerativeModel({
-        model: "gemini-1.5-pro",
-        safetySettings: safetySettings
-      });
-      
-      // Find content by session ID if available
-      let contentContext = '';
-      let title = '';
-      
-      if (sessionId && mongoose.connection.readyState === 1) {
-        try {
-          const content = await Content.findOne({ sessionId });
-          if (content) {
-            contentContext = content.summary || '';
-            title = content.title || '';
-            console.log(`📄 Found content for session: ${title}`);
-          }
-        } catch (contentError) {
-          console.error('❌ Error retrieving content for chatbot:', contentError);
-          // Continue without content context
-        }
-      }
-      
-      // Create system prompt with content context if available
-      let systemPrompt = 'You are an AI assistant for a document analysis application called SplanAI. Your role is to help users understand their documents and answer questions about the content.';
-      
-      if (contentContext) {
-        systemPrompt += `\n\nHere is a summary of the document being discussed:\n${contentContext}\n\nPlease use this information to provide helpful responses about the document.`;
-      }
-      
-      try {
-        // Create chat session
-        const chat = model.startChat({
-          generationConfig: {
-            temperature: 0.7,
-            topP: 0.8,
-            topK: 40,
-            maxOutputTokens: 1024,
-          },
-          history: [
-            {
-              role: "user",
-              parts: [{ text: systemPrompt }],
-            },
-            {
-              role: "model",
-              parts: [{ text: "I understand. I'll help the user with their document and answer their questions based on the content." }],
-            },
-          ],
-        });
-        
-        // Add previous messages from history if available
-        if (Array.isArray(history) && history.length > 0) {
-          for (const item of history) {
-            if (item.role === 'user' && item.content) {
-              await chat.sendMessage(item.content);
-            }
-          }
-        }
-        
-        // Generate response
-        console.log('⏳ Generating chatbot response...');
-        const result = await chat.sendMessage(message);
-        const responseText = result.response.text();
-        
-        console.log(`✅ Chatbot response generated (${responseText.length} characters)`);
-        
-        // Save chat history to database if user is authenticated and DB is connected
-        if (userId && mongoose.connection.readyState === 1) {
-          try {
-            // Find existing chat or create new one
-            let chatSession = await ChatHistory.findOne({ sessionId, userId });
-            
-            if (!chatSession) {
-              chatSession = new ChatHistory({
-                sessionId,
-                userId,
-                title: title || 'Chat Session',
-                history: []
-              });
-            }
-            
-            // Add new messages to history
-            chatSession.history.push({ role: 'user', content: message });
-            chatSession.history.push({ role: 'assistant', content: responseText });
-            
-            // Update last activity
-            chatSession.lastActivity = new Date();
-            
-            // Save chat session
-            await chatSession.save();
-            console.log('✅ Chat history saved to database');
-          } catch (chatSaveError) {
-            console.error('❌ Error saving chat history:', chatSaveError);
-            // Continue without saving chat history
-          }
-        }
-        
-        // Return the response
-        return res.status(200).json({
-          message: 'Chatbot response generated successfully',
-          sessionId,
-          reply: responseText
-        });
-      } catch (aiError) {
-        console.error('❌ Chatbot AI Error:', aiError);
-        return res.status(500).json({ 
-          error: 'Chatbot processing failed', 
-          message: `Could not generate a response: ${aiError.message}`,
-          reply: "I'm sorry, I encountered an error while processing your request. Please try again with a different question.",
-          sessionId 
-        });
-      }
-    } catch (error) {
-      console.error('❌ Chatbot Error:', error);
-      return res.status(500).json({ 
-        error: 'Chatbot request failed', 
-        message: error.message,
-        reply: "I'm sorry, I'm having trouble processing your request right now. Please try again later."
-      });
-    }
-  } catch (outerError) {
-    console.error('❌ Fatal Chatbot Error:', outerError);
-    return res.status(500).json({
-      error: 'Fatal chatbot error',
-      message: outerError.message,
-      reply: "I apologize, but I'm experiencing technical difficulties. Please try again later."
-    });
-  }
-});
-
-// Support for both production and development environments
-if (process.env.NODE_ENV === 'production') {
-  // Serve static files from the React app
-  app.use(express.static(path.join(__dirname, 'public')));
-  
-  // For any request that doesn't match one above, send back React's index.html file
-  app.get('*', (req, res) => {
-    res.sendFile(path.join(__dirname, 'public', 'index.html'));
-  });
-} else {
-  // Development mode - serve only the API endpoints
-  app.use(express.static(path.join(__dirname, 'public')));
-  app.get('/', (req, res) => {
-    res.sendFile(path.join(__dirname, 'public', 'index.html'));
-  });
-}
-
-// Generate flashcards endpoint
-app.post('/api/generate-flashcards', async (req, res) => {
-  try {
-    const { sessionId } = req.body;
-    
-    if (!sessionId) {
-      return res.status(400).json({ error: 'Session ID is required' });
-    }
-    
-    // Find content by session ID
-    const content = await Content.findOne({ sessionId });
-    
-    if (!content) {
-      return res.status(404).json({ error: 'Content not found for this session' });
-    }
-    
-    // Get the content text
-    const contentText = content.text || content.summary || '';
-    
-    if (!contentText) {
-      return res.status(400).json({ error: 'No content available to generate flashcards' });
-    }
-    
-    // Get the Gemini Pro model with safety settings
-    const model = genAI.getGenerativeModel({
-      model: "gemini-1.5-pro",
-      safetySettings: safetySettings
-    });
-    
-    // Generate flashcards
-    const prompt = `
-      Generate 10 flashcards from the following content. 
-      Each flashcard should have a question and an answer.
-      Format the output as a JSON array of objects, each with 'question' and 'answer' properties.
-      Make the questions challenging but concise.
-      
-      Content:
-      ${contentText.substring(0, 10000)} // Limit content to 10000 characters
-    `;
-    
-    const result = await model.generateContent(prompt);
-    const responseText = result.response.text();
-    
-    // Parse the response to extract the JSON
-    let flashcardsJson;
-    try {
-      // Find JSON in the response
-      const jsonMatch = responseText.match(/\[\s*\{.*\}\s*\]/s);
-      
-      if (jsonMatch) {
-        flashcardsJson = JSON.parse(jsonMatch[0]);
-      } else {
-        // Try to parse the entire response as JSON
-        flashcardsJson = JSON.parse(responseText);
-      }
-      
-      // Validate the structure
-      if (!Array.isArray(flashcardsJson)) {
-        throw new Error('Response is not an array');
-      }
-      
-      // Ensure each item has question and answer
-      flashcardsJson = flashcardsJson.filter(card => 
-        card && typeof card === 'object' && 
-        typeof card.question === 'string' && 
-        typeof card.answer === 'string'
-      );
-      
-      if (flashcardsJson.length === 0) {
-        throw new Error('No valid flashcards found');
-      }
-    } catch (parseError) {
-      console.error('Error parsing flashcards JSON:', parseError);
-      
-      // Fallback: Extract Q&A pairs manually
-      const pairs = responseText.split(/\n\s*\n/).filter(p => p.trim());
-      flashcardsJson = [];
-      
-      for (const pair of pairs) {
-        const qMatch = pair.match(/Q(?:uestion)?:?\s*(.*?)(?:\n|$)/i);
-        const aMatch = pair.match(/A(?:nswer)?:?\s*(.*?)(?:\n|$)/i);
-        
-        if (qMatch && aMatch) {
-          flashcardsJson.push({
-            question: qMatch[1].trim(),
-            answer: aMatch[1].trim()
-          });
-        }
-      }
-      
-      if (flashcardsJson.length === 0) {
-        return res.status(500).json({ 
-          error: 'Failed to parse flashcards', 
-          message: 'The AI generated an invalid response format'
-        });
-      }
-    }
-    
-    // Save flashcards to the database
-    content.flashcards = flashcardsJson;
-    await content.save();
-    
-    return res.status(200).json({ 
-      message: 'Flashcards generated successfully',
-      flashcards: flashcardsJson
-    });
-  } catch (error) {
-    console.error('Error generating flashcards:', error);
-    return res.status(500).json({ 
-      error: 'Failed to generate flashcards', 
-      message: error.message
-    });
-  }
-});
-
-// Generate quiz endpoint
-app.post('/api/generate-quiz', async (req, res) => {
-  try {
-    const { sessionId } = req.body;
-    
-    if (!sessionId) {
-      return res.status(400).json({ error: 'Session ID is required' });
-    }
-    
-    // Find content by session ID
-    const content = await Content.findOne({ sessionId });
-    
-    if (!content) {
-      return res.status(404).json({ error: 'Content not found for this session' });
-    }
-    
-    // Get the content text
-    const contentText = content.text || content.summary || '';
-    
-    if (!contentText) {
-      return res.status(400).json({ error: 'No content available to generate quiz' });
-    }
-    
-    // Get the Gemini Pro model with safety settings
-    const model = genAI.getGenerativeModel({
-      model: "gemini-1.5-pro",
-      safetySettings: safetySettings
-    });
-    
-    // Generate quiz
-    const prompt = `
-      Generate a quiz with 5 multiple-choice questions from the following content.
-      Each question should have 4 options (A, B, C, D) with one correct answer.
-      Format the output as a JSON array of objects, each with 'question', 'options' (array of 4 strings), and 'correctAnswer' (index 0-3) properties.
-      
-      Content:
-      ${contentText.substring(0, 10000)} // Limit content to 10000 characters
-    `;
-    
-    const result = await model.generateContent(prompt);
-    const responseText = result.response.text();
-    
-    // Parse the response to extract the JSON
-    let quizJson;
-    try {
-      // Find JSON in the response
-      const jsonMatch = responseText.match(/\[\s*\{.*\}\s*\]/s);
-      
-      if (jsonMatch) {
-        quizJson = JSON.parse(jsonMatch[0]);
-      } else {
-        // Try to parse the entire response as JSON
-        quizJson = JSON.parse(responseText);
-      }
-      
-      // Validate the structure
-      if (!Array.isArray(quizJson)) {
-        throw new Error('Response is not an array');
-      }
-      
-      // Ensure each item has required properties
-      quizJson = quizJson.filter(q => 
-        q && typeof q === 'object' && 
-        typeof q.question === 'string' && 
-        Array.isArray(q.options) && 
-        q.options.length === 4 &&
-        (typeof q.correctAnswer === 'number' || typeof q.correctAnswer === 'string')
-      );
-      
-      // Normalize correctAnswer to be a number
-      quizJson = quizJson.map(q => {
-        if (typeof q.correctAnswer === 'string') {
-          // Handle letter answers (A, B, C, D)
-          const index = q.correctAnswer.toUpperCase().charCodeAt(0) - 65;
-          if (index >= 0 && index <= 3) {
-            q.correctAnswer = index;
-          } else {
-            // Try to parse as number
-            q.correctAnswer = parseInt(q.correctAnswer, 10);
-            // Ensure it's in range
-            if (isNaN(q.correctAnswer) || q.correctAnswer < 0 || q.correctAnswer > 3) {
-              q.correctAnswer = 0;
-            }
-          }
-        }
-        return q;
-      });
-      
-      if (quizJson.length === 0) {
-        throw new Error('No valid quiz questions found');
-      }
-    } catch (parseError) {
-      console.error('Error parsing quiz JSON:', parseError);
-      return res.status(500).json({ 
-        error: 'Failed to parse quiz', 
-        message: 'The AI generated an invalid response format'
-      });
-    }
-    
-    // Save quiz to the database
-    content.quiz = quizJson;
-    await content.save();
-    
-    return res.status(200).json({ 
-      message: 'Quiz generated successfully',
-      quiz: quizJson
-    });
-  } catch (error) {
-    console.error('Error generating quiz:', error);
-    return res.status(500).json({ 
-      error: 'Failed to generate quiz', 
-      message: error.message
-    });
   }
 });
