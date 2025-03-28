@@ -21,6 +21,12 @@ const PDFDocument = require('pdfkit');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// Configure multer for file uploads
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 20 * 1024 * 1024 } // Limit file size to 20MB
+});
+
 // Modified MongoDB Atlas Connection to use await properly
 const connectDB = async () => {
   try {
@@ -368,12 +374,12 @@ const auth = async (req, res, next) => {
     const connected = !!connection;
     
     if (connected) {
-      console.log('Initializing MongoDB models...');
+      console.log('✅ Initializing MongoDB models...');
       // Create models only after connection is established
       User = mongoose.model('User', UserSchema);
       Content = mongoose.model('Content', ContentSchema);
       ChatHistory = mongoose.model('ChatHistory', ChatHistorySchema);
-      console.log('MongoDB models initialized successfully');
+      console.log('✅ MongoDB models initialized successfully');
       
       // Configure session store with MongoDB if connected
       try {
@@ -389,7 +395,7 @@ const auth = async (req, res, next) => {
         if (!uri.includes("ssl=")) uri += (uri.includes("?") ? "&" : "?") + "ssl=true";
         if (!uri.includes("tls=")) uri += "&tls=true";
         
-        console.log(' Setting up MongoDB session store');
+        console.log('🔄 Setting up MongoDB session store');
         
         sessionConfig.store = MongoStore.create({
           mongoUrl: uri,
@@ -409,13 +415,13 @@ const auth = async (req, res, next) => {
           }
         });
         
-        console.log(' MongoDB session store configured');
+        console.log('✅ MongoDB session store configured');
       } catch (sessionErr) {
-        console.error(' Error initializing MongoStore:', sessionErr.message);
-        console.log(' Falling back to in-memory session store');
+        console.error('❌ Error initializing MongoStore:', sessionErr.message);
+        console.log('⚠️ Falling back to in-memory session store');
       }
     } else {
-      console.warn(' MongoDB not connected, initializing models with limited functionality');
+      console.warn('⚠️ MongoDB not connected, initializing models with limited functionality');
       // Create models to avoid errors, but they won't work without DB connection
       User = mongoose.model('User', UserSchema);
       Content = mongoose.model('Content', ContentSchema);
@@ -425,11 +431,6 @@ const auth = async (req, res, next) => {
     // Express App Configuration
     app.use(express.json({ limit: '50mb' })); // Support for JSON payloads with larger limit
     app.use(express.urlencoded({ extended: true, limit: '50mb' })); // Support for form data
-    
-    const upload = multer({
-      storage: multer.memoryStorage(),
-      limits: { fileSize: 20 * 1024 * 1024 } // Limit file size to 20MB
-    });
 
     // Security configuration
     app.use(helmet({
@@ -476,17 +477,401 @@ const auth = async (req, res, next) => {
       res.status(200).json({ 
         status: 'ok', 
         timestamp: new Date().toISOString(),
-        mongodb: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected'
+        mongodb: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected',
+        environment: process.env.NODE_ENV || 'development'
       });
     });
     
+    // =================== API ROUTES ===================
+    
+    // User Authentication Routes
+    
+    // Register User
+    app.post('/api/auth/register', async (req, res) => {
+      try {
+        // First check if MongoDB is connected
+        if (mongoose.connection.readyState !== 1) {
+          console.warn('⚠️ Registration attempted before MongoDB connection is ready');
+          return res.status(503).json({ 
+            error: 'Database connection not ready',
+            message: 'The server database is currently connecting. Please try again in a moment.'
+          });
+        }
+        
+        const { username, email, password } = req.body;
+        
+        // Validate input
+        if (!username || !email || !password) {
+          return res.status(400).json({ error: 'All fields are required' });
+        }
+        
+        // Check if user already exists
+        const existingUser = await User.findOne({ $or: [{ email }, { username }] });
+        if (existingUser) {
+          return res.status(400).json({ error: 'User already exists with that email or username' });
+        }
+        
+        // Hash password
+        const salt = await bcrypt.genSalt(10);
+        const hashedPassword = await bcrypt.hash(password, salt);
+        
+        // Create user
+        const user = new User({
+          username,
+          email,
+          password: hashedPassword
+        });
+        
+        await user.save();
+        
+        // Create token
+        const token = jwt.sign(
+          { userId: user._id },
+          process.env.JWT_SECRET || 'splanAI-jwt-secret',
+          { expiresIn: '7d' }
+        );
+        
+        // Set session
+        req.session.userId = user._id;
+        
+        res.status(201).json({
+          message: 'User registered successfully',
+          token,
+          user: {
+            id: user._id,
+            username: user.username,
+            email: user.email
+          }
+        });
+      } catch (error) {
+        console.error('Registration error:', error);
+        res.status(500).json({ error: 'Server error during registration' });
+      }
+    });
+    
+    // Login User
+    app.post('/api/auth/login', async (req, res) => {
+      try {
+        // First check if MongoDB is connected
+        if (mongoose.connection.readyState !== 1) {
+          console.warn('⚠️ Login attempted before MongoDB connection is ready');
+          return res.status(503).json({ 
+            error: 'Database connection not ready',
+            message: 'The server database is currently connecting. Please try again in a moment.'
+          });
+        }
+        
+        const { email, password } = req.body;
+        
+        // Validate input
+        if (!email || !password) {
+          return res.status(400).json({ error: 'Email and password are required' });
+        }
+        
+        // Find user
+        const user = await User.findOne({ email }).select('+password');
+        if (!user) {
+          return res.status(401).json({ error: 'Invalid credentials' });
+        }
+        
+        // Check password
+        const isMatch = await bcrypt.compare(password, user.password);
+        if (!isMatch) {
+          return res.status(401).json({ error: 'Invalid credentials' });
+        }
+        
+        // Update last login
+        user.lastLogin = new Date();
+        await user.save();
+        
+        // Create token
+        const token = jwt.sign(
+          { userId: user._id },
+          process.env.JWT_SECRET || 'splanAI-jwt-secret',
+          { expiresIn: '7d' }
+        );
+        
+        // Set session
+        req.session.userId = user._id;
+        
+        res.json({
+          message: 'Login successful',
+          token,
+          user: {
+            id: user._id,
+            username: user.username,
+            email: user.email
+          }
+        });
+      } catch (error) {
+        console.error('Login error:', error);
+        res.status(500).json({ error: 'Server error during login' });
+      }
+    });
+    
+    // Logout User
+    app.post('/api/auth/logout', (req, res) => {
+      try {
+        req.session.destroy(err => {
+          if (err) {
+            return res.status(500).json({ error: 'Could not log out, please try again' });
+          }
+          res.clearCookie('connect.sid');
+          res.json({ message: 'Logged out successfully' });
+        });
+      } catch (error) {
+        console.error('Logout error:', error);
+        res.status(500).json({ error: 'Server error during logout' });
+      }
+    });
+    
+    // Get current user
+    app.get('/api/auth/me', auth, (req, res) => {
+      try {
+        res.json({
+          user: {
+            id: req.user._id,
+            username: req.user.username,
+            email: req.user.email,
+            role: req.user.role,
+            createdAt: req.user.createdAt,
+            lastLogin: req.user.lastLogin
+          }
+        });
+      } catch (error) {
+        console.error('Get user error:', error);
+        res.status(500).json({ error: error.message || 'Error getting user data' });
+      }
+    });
+    
+    // Content Routes
+    // Process file upload
+    app.post('/api/process', upload.single('file'), async (req, res) => {
+      try {
+        if (!req.file) {
+          return res.status(400).json({ error: 'No file uploaded' });
+        }
+        
+        // Get user ID if authenticated
+        const userId = req.session?.userId || null;
+        
+        const sessionId = uuidv4();
+        const fileType = req.file.mimetype;
+        
+        console.log(`Processing uploaded file: ${fileType}`);
+        
+        // First check if MongoDB is connected before proceeding
+        if (mongoose.connection.readyState !== 1) {
+          console.warn('MongoDB not connected during file processing');
+        }
+        
+        const result = await processContent(req.file.buffer, sessionId, fileType, userId);
+        
+        // Send a more complete response with all necessary data
+        res.json({ 
+          sessionId, 
+          title: result.title || 'Untitled Document',
+          summary: result.summary,
+          flashcards: result.flashcards,
+          quizzes: result.quizzes,
+          originalText: result.originalText,
+          message: 'File processed successfully' 
+        });
+      } catch (error) {
+        console.error('Error processing file:', error);
+        res.status(500).json({ 
+          error: 'Failed to process file',
+          details: process.env.NODE_ENV === 'development' ? error.message : undefined
+        });
+      }
+    });
+    
+    // Process direct text input
+    app.post('/api/process-text', async (req, res) => {
+      try {
+        const { text, title } = req.body;
+        
+        if (!text || typeof text !== 'string' || text.trim().length === 0) {
+          return res.status(400).json({ error: 'Text input is required' });
+        }
+        
+        // Get user ID if authenticated
+        const userId = req.session?.userId || null;
+        
+        const sessionId = uuidv4();
+        console.log(`Processing direct text input, length: ${text.length}`);
+        
+        // First check if MongoDB is connected before proceeding
+        if (mongoose.connection.readyState !== 1) {
+          console.warn('MongoDB not connected during text processing');
+        }
+        
+        const metadata = {
+          contentType: 'text',
+          source: 'direct-input',
+          title: title && title.trim() ? title.trim() : undefined
+        };
+        
+        const result = await processTextContent(text, sessionId, metadata, userId);
+        
+        // Return the processed data
+        res.json({ 
+          sessionId,
+          title: result.title || 'Untitled Document',
+          summary: result.summary,
+          flashcards: result.flashcards,
+          quizzes: result.quizzes,
+          message: 'Text processed successfully'
+        });
+      } catch (error) {
+        console.error('Error processing text:', error);
+        res.status(500).json({ 
+          error: 'Failed to process text',
+          details: process.env.NODE_ENV === 'development' ? error.message : undefined
+        });
+      }
+    });
+    
+    // Get content by sessionId
+    app.get('/api/content/:sessionId', async (req, res) => {
+      try {
+        const { sessionId } = req.params;
+        
+        if (!sessionId) {
+          return res.status(400).json({ error: 'Session ID is required' });
+        }
+        
+        // Check if MongoDB is connected
+        if (mongoose.connection.readyState !== 1) {
+          console.warn('⚠️ Content retrieval attempted before MongoDB connection is ready');
+          return res.status(503).json({ 
+            error: 'Database connection not ready',
+            message: 'The server database is currently connecting. Please try again in a moment.'
+          });
+        }
+        
+        const content = await Content.findOne({ sessionId });
+        
+        if (!content) {
+          return res.status(404).json({ error: 'Content not found' });
+        }
+        
+        res.json({ 
+          sessionId,
+          title: content.title || 'Untitled Document',
+          summary: content.summary,
+          flashcards: content.flashcards || [],
+          quizzes: content.quizzes || [],
+          originalText: content.originalText
+        });
+      } catch (error) {
+        console.error('Error retrieving content:', error);
+        res.status(500).json({ 
+          error: 'Failed to retrieve content',
+          details: process.env.NODE_ENV === 'development' ? error.message : undefined
+        });
+      }
+    });
+    
+    // Chatbot API endpoint
+    app.post('/api/chatbot', async (req, res) => {
+      try {
+        const { message, sessionId } = req.body;
+        
+        if (!message) {
+          return res.status(400).json({ error: 'Message is required' });
+        }
+        
+        // Use Gemini model for chatbot functionality
+        const model = genAI.getGenerativeModel({ model: "gemini-pro" });
+        
+        // Prepare chat history if available
+        let chatHistory = [];
+        if (sessionId && mongoose.connection.readyState === 1) {
+          try {
+            const history = await ChatHistory.findOne({ sessionId });
+            if (history && history.messages) {
+              // Convert to format Gemini can use
+              chatHistory = history.messages.map(msg => ({
+                role: msg.role === 'assistant' ? 'model' : 'user',
+                parts: [{ text: msg.content }]
+              }));
+            }
+          } catch (historyError) {
+            console.error('Error retrieving chat history:', historyError);
+          }
+        }
+        
+        // Create the Gemini chat
+        const chat = model.startChat({
+          history: chatHistory.length > 0 ? chatHistory : [
+            {
+              role: "model",
+              parts: [{ 
+                text: `I am a helpful study assistant for SplanAI, an app that helps students learn from their notes, documents, and images.
+                SplanAI can create summaries, flashcards, and quizzes from uploaded content.
+                I'll be friendly, concise, and helpful. If I don't know something, I'll suggest using the app's features instead.
+                I'll keep responses under 150 words to fit nicely in the chat interface.`
+              }]
+            }
+          ],
+          generationConfig: {
+            temperature: 0.7,
+            maxOutputTokens: 300
+          }
+        });
+        
+        // Send the message and get a response
+        const result = await chat.sendMessage(message);
+        const reply = result.response.text();
+        
+        // Save chat history if connected to database and sessionId provided
+        if (mongoose.connection.readyState === 1 && sessionId) {
+          try {
+            // Find or create a chat history document
+            await ChatHistory.findOneAndUpdate(
+              { sessionId },
+              { 
+                $push: { 
+                  messages: [
+                    { role: 'user', content: message },
+                    { role: 'assistant', content: reply }
+                  ]
+                },
+                $setOnInsert: { createdAt: new Date() },
+                $set: { updatedAt: new Date() }
+              },
+              { upsert: true, new: true }
+            );
+          } catch (dbError) {
+            console.error('Error saving chat history:', dbError);
+          }
+        }
+        
+        res.json({ reply });
+      } catch (error) {
+        console.error('Chatbot error:', error);
+        res.status(500).json({ 
+          error: 'Error processing your message',
+          details: process.env.NODE_ENV === 'development' ? error.message : undefined
+        });
+      }
+    });
+    
+    // Catch-all route for SPA in production
+    if (process.env.NODE_ENV === 'production') {
+      app.get('*', (req, res) => {
+        res.sendFile(path.join(__dirname, 'public', 'index.html'));
+      });
+    }
+    
     // Start the server after all setup is complete
     app.listen(PORT, () => {
-      console.log(` Server running on port ${PORT} in ${process.env.NODE_ENV || 'development'} mode`);
-      console.log(` MongoDB Connection Status: ${mongoose.connection.readyState === 1 ? 'Connected' : 'Disconnected'}`);
+      console.log(`✅ Server running on port ${PORT} in ${process.env.NODE_ENV || 'development'} mode`);
+      console.log(`📊 MongoDB Connection Status: ${mongoose.connection.readyState === 1 ? 'Connected' : 'Disconnected'}`);
     });
   } catch (setupError) {
-    console.error(' Fatal error during application setup:', setupError);
+    console.error('❌ Fatal error during application setup:', setupError);
     process.exit(1); // Exit with error code
   }
 })();
