@@ -1784,29 +1784,27 @@ document.addEventListener('DOMContentLoaded', function() {
         console.log(`Received ${data.quiz.length} quiz questions`);
         console.log('Quiz data structure:', JSON.stringify(data.quiz, null, 2)); // Log full quiz data structure
         
-        quizzes = data.quiz;
-        currentQuizIndex = 0;
-        correctAnswers = 0;
+        // Clear existing quizzes
+        quizzes = [];
         
-        // Ensure all quiz questions have the required properties
-        quizzes = quizzes.map(q => {
+        // Process and add each quiz question
+        data.quiz.forEach(q => {
           console.log('Processing quiz question:', q); // Log each question being processed
-          // Make sure each question has the correct structure
-          return {
+          
+          // Create a properly structured quiz question
+          const processedQuiz = {
             question: q.question || 'Question not available',
             options: Array.isArray(q.options) ? q.options : [],
             answer: q.answer || '',
             explanation: q.explanation || 'No explanation provided'
           };
-        });
-        
-        // Filter out any invalid questions
-        quizzes = quizzes.filter(q => {
-          const isValid = q.options.length > 0 && q.answer;
-          if (!isValid) {
+          
+          // Only add valid questions
+          if (processedQuiz.options.length > 0 && processedQuiz.answer) {
+            quizzes.push(processedQuiz);
+          } else {
             console.warn('Filtered out invalid quiz question:', q);
           }
-          return isValid;
         });
         
         if (quizzes.length === 0) {
@@ -1815,13 +1813,70 @@ document.addEventListener('DOMContentLoaded', function() {
         
         console.log('Final processed quizzes:', quizzes); // Log final processed quiz data
         
+        // Reset quiz state
+        currentQuizIndex = 0;
+        correctAnswers = 0;
+        
         // Force the quiz tab to be visible first
         document.querySelector('[data-tab="quiz-tab"]').click();
         
-        // Then update the UI with a slight delay to ensure DOM is ready
-        setTimeout(() => {
-          updateQuizUI();
-        }, 100);
+        // Directly manipulate the DOM to ensure quiz is visible
+        const quizContainer = document.getElementById('quiz-container');
+        const noContentMessage = quizContainer.querySelector('.no-content-message');
+        const quizContent = document.getElementById('quiz-content');
+        
+        // Hide no-content message
+        if (noContentMessage) {
+          noContentMessage.classList.add('hidden');
+          noContentMessage.style.display = 'none';
+        }
+        
+        // Show quiz content
+        if (quizContent) {
+          quizContent.classList.remove('hidden');
+          quizContent.style.display = 'block';
+          
+          // Set question and progress
+          const quizQuestion = document.getElementById('quiz-question');
+          const quizProgress = document.getElementById('quiz-progress');
+          const quizOptions = document.querySelector('.quiz-options');
+          
+          if (quizQuestion && quizProgress && quizOptions && quizzes.length > 0) {
+            // Display the first question
+            const firstQuiz = quizzes[0];
+            quizQuestion.textContent = firstQuiz.question;
+            quizProgress.textContent = `Question 1 of ${quizzes.length}`;
+            
+            // Clear and create options
+            quizOptions.innerHTML = '';
+            quizOptions.style.display = 'grid';
+            
+            firstQuiz.options.forEach((option, index) => {
+              const optionElement = document.createElement('div');
+              optionElement.className = 'quiz-option';
+              optionElement.textContent = option;
+              optionElement.dataset.index = index;
+              
+              optionElement.addEventListener('click', () => {
+                if (quizAnswered) return;
+                
+                // Remove selection from all options
+                quizOptions.querySelectorAll('.quiz-option').forEach(opt => {
+                  opt.classList.remove('selected');
+                });
+                
+                // Select this option
+                optionElement.classList.add('selected');
+                selectedOption = option;
+                
+                // Enable next/finish button
+                document.getElementById('quiz-next').disabled = false;
+              });
+              
+              quizOptions.appendChild(optionElement);
+            });
+          }
+        }
         
         // Show notification
         showNotification(`Quiz generated successfully with ${quizzes.length} questions!`, 'success');
