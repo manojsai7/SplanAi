@@ -409,8 +409,45 @@ const ContentSchema = new mongoose.Schema({
   }
 }, { timestamps: true });
 
+// Chat History Schema
+const ChatHistorySchema = new mongoose.Schema({
+  sessionId: {
+    type: String,
+    required: true,
+    index: true
+  },
+  userId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User'
+  },
+  messages: [{
+    role: {
+      type: String,
+      enum: ['user', 'assistant', 'system'],
+      required: true
+    },
+    content: {
+      type: String,
+      required: true
+    },
+    timestamp: {
+      type: Date,
+      default: Date.now
+    }
+  }],
+  createdAt: {
+    type: Date,
+    default: Date.now
+  },
+  updatedAt: {
+    type: Date,
+    default: Date.now
+  }
+});
+
 const User = mongoose.model('User', UserSchema);
 const Content = mongoose.model('Content', ContentSchema);
+const ChatHistory = mongoose.model('ChatHistory', ChatHistorySchema);
 
 // Authentication middleware
 const auth = async (req, res, next) => {
@@ -460,114 +497,154 @@ const processTextContent = async (text, sessionId, metadata = {}, userId = null)
     // AI Processing with OpenAI
     console.log('Processing with OpenAI, text length:', fullText.length);
     
-    const [summaryResponse, flashcardsResponse, quizzesResponse] = await Promise.all([
-      openai.chat.completions.create({
-        model: 'gpt-4',
-        messages: [{ role: 'user', content: `Summarize this in three paragraphs:\n${fullText}` }]
-      }),
-      openai.chat.completions.create({
-        model: 'gpt-4',
-        messages: [{ 
-          role: 'user', 
-          content: `Generate 5 flashcards from this text in the following JSON format:
-          [
-            {
-              "question": "Question here?",
-              "answer": "Answer here",
-              "confidence": 0.9,
-              "tags": ["tag1", "tag2"]
-            }
-          ]
-          Text: ${fullText}` 
-        }]
-      }),
-      openai.chat.completions.create({
-        model: 'gpt-4',
-        messages: [{ 
-          role: 'user', 
-          content: `Create 3 quiz questions based on this text in the following JSON format:
-          [
-            {
-              "question": "Question here?",
-              "options": ["Option A", "Option B", "Option C", "Option D"],
-              "answer": "Option A",
-              "explanation": "Explanation here"
-            }
-          ]
-          Text: ${fullText}` 
-        }]
-      })
-    ]);
-
-    // Parse JSON responses with error handling
-    let flashcards, quizzes;
+    // Use gpt-3.5-turbo model instead of gpt-4 for better compatibility
+    const MODEL = 'gpt-3.5-turbo';
+    
     try {
-      const flashcardsContent = flashcardsResponse.choices[0].message.content;
-      flashcards = JSON.parse(flashcardsContent);
-    } catch (e) {
-      console.error('Failed to parse flashcards JSON:', e);
-      flashcards = [{ 
-        question: "What is this document about?", 
-        answer: "See summary for details", 
-        confidence: 0.5, 
-        tags: ["auto-generated"] 
-      }];
-    }
-
-    try {
-      const quizzesContent = quizzesResponse.choices[0].message.content;
-      quizzes = JSON.parse(quizzesContent);
-    } catch (e) {
-      console.error('Failed to parse quizzes JSON:', e);
-      quizzes = [{ 
-        question: "What is the main topic of this document?", 
-        options: ["Option A", "Option B", "Option C", "Option D"], 
-        answer: "See summary for details", 
-        explanation: "Auto-generated fallback question" 
-      }];
-    }
-
-    // Generate a title for the document
-    let title = "Untitled Document";
-    if (fullText.length > 10) {
-      try {
-        const titleResponse = await openai.chat.completions.create({
-          model: 'gpt-4',
+      const [summaryResponse, flashcardsResponse, quizzesResponse] = await Promise.all([
+        openai.chat.completions.create({
+          model: MODEL,
+          messages: [{ role: 'user', content: `Summarize this in three paragraphs:\n${fullText}` }],
+          temperature: 0.7,
+          max_tokens: 500
+        }),
+        openai.chat.completions.create({
+          model: MODEL,
           messages: [{ 
             role: 'user', 
-            content: `Generate a short, descriptive title (5-7 words) for this document:\n${fullText.substring(0, 500)}...` 
-          }]
-        });
-        title = titleResponse.choices[0].message.content.trim().replace(/^["'](.*)["']$/, '$1');
-      } catch (e) {
-        console.error('Failed to generate title:', e);
-      }
-    }
-
-    // Save to Database
-    const contentDoc = new Content({
-      sessionId,
-      userId: userId, // Link to user if authenticated
-      title: title,
-      content: {
-        text: fullText,
-        flashcards: flashcards,
-        quizzes: quizzes,
-        summary: summaryResponse.choices[0].message.content,
-        metadata: {
-          pages: 1,
-          languages: ['en'],
-          processedAt: new Date(),
-          ...metadata
+            content: `Generate 5 flashcards from this text in the following JSON format:
+            [
+              {
+                "question": "Question here?",
+                "answer": "Answer here",
+                "confidence": 0.9,
+                "tags": ["tag1", "tag2"]
+              }
+            ]
+            Text: ${fullText}` 
+          }],
+          temperature: 0.7,
+          response_format: { type: "json_object" },
+          max_tokens: 1000
+        }),
+        openai.chat.completions.create({
+          model: MODEL,
+          messages: [{ 
+            role: 'user', 
+            content: `Generate 3 multiple-choice questions with answers from this text in the following format:
+            [
+              {
+                "question": "Question text here?",
+                "options": ["Option A", "Option B", "Option C", "Option D"],
+                "answer": "Option A",
+                "explanation": "Brief explanation here"
+              }
+            ]
+            Text: ${fullText}` 
+          }],
+          temperature: 0.7,
+          response_format: { type: "json_object" },
+          max_tokens: 1000
+        }),
+      ]);
+      
+      console.log('✅ AI processing completed successfully');
+      
+      // Extract content from responses
+      const summary = summaryResponse.choices[0]?.message?.content?.trim() || '';
+      let flashcards = [];
+      let quizzes = [];
+      
+      try {
+        // Parse JSON responses with error handling
+        const flashcardsContent = flashcardsResponse.choices[0]?.message?.content?.trim() || '[]';
+        flashcards = JSON.parse(extractJSONFromString(flashcardsContent));
+        
+        const quizzesContent = quizzesResponse.choices[0]?.message?.content?.trim() || '[]';
+        quizzes = JSON.parse(extractJSONFromString(quizzesContent));
+      } catch (jsonError) {
+        console.error('Error parsing AI response JSON:', jsonError);
+        // Create fallback content if parsing fails
+        if (flashcards.length === 0) {
+          flashcards = [{ question: "What is this text about?", answer: "Unable to generate specific flashcards", confidence: 0.5, tags: ["general"] }];
+        }
+        if (quizzes.length === 0) {
+          quizzes = [{ 
+            question: "What is the main topic discussed?", 
+            options: ["Topic A", "Topic B", "Topic C", "Cannot determine"], 
+            answer: "Cannot determine", 
+            explanation: "Unable to generate specific questions from the text."
+          }];
         }
       }
-    });
-
-    await contentDoc.save();
-    return contentDoc;
-  } catch (error) {
-    console.error('AI Processing Error:', error);
-    throw new Error('Advanced content processing failed: ' + error.message);
+      
+      // Generate title using the AI
+      let title = metadata.title || '';
+      
+      if (!title) {
+        try {
+          const titleResponse = await openai.chat.completions.create({
+            model: MODEL,
+            messages: [{ 
+              role: 'user', 
+              content: `Create a very short title (5-7 words max) for this text:\n${fullText.substring(0, 1000)}...` 
+            }],
+            temperature: 0.7,
+            max_tokens: 50
+          });
+          
+          title = titleResponse.choices[0]?.message?.content?.trim() || 'Untitled Document';
+        } catch (titleError) {
+          console.error('Error generating title:', titleError);
+          title = 'Untitled Document';
+        }
+      }
+      
+      // Save results to database if connected
+      const contentData = {
+        sessionId,
+        title,
+        originalText: fullText,
+        summary,
+        flashcards,
+        quizzes,
+        metadata: {
+          ...metadata,
+          processedAt: new Date(),
+          textLength: fullText.length,
+          processingStatus: 'completed'
+        }
+      };
+      
+      // If user is authenticated, associate content with user
+      if (userId) {
+        contentData.userId = userId;
+      }
+      
+      // Save to database if mongoose is connected
+      if (mongoose.connection.readyState === 1) {
+        try {
+          await Content.findOneAndUpdate(
+            { sessionId },
+            contentData,
+            { upsert: true, new: true }
+          );
+          console.log('Content saved to database with sessionId:', sessionId);
+        } catch (dbError) {
+          console.error('Error saving to database:', dbError);
+        }
+      } else {
+        console.log('Database not connected, skipping save');
+      }
+      
+      return contentData;
+    } catch (aiError) {
+      console.error('AI Processing Error:', aiError);
+      throw new Error(`Advanced content processing failed: ${aiError.message}`);
+    }
+  } catch (err) {
+    console.error('Error processing text:', err);
+    throw err;
   }
 };
 
@@ -1029,6 +1106,68 @@ app.get('/api/content/:sessionId/download/flashcards', async (req, res) => {
   }
 });
 
+// Chatbot API endpoint
+app.post('/api/chatbot', async (req, res) => {
+  try {
+    const { message, sessionId } = req.body;
+    
+    if (!message) {
+      return res.status(400).json({ error: 'Message is required' });
+    }
+    
+    // Use gpt-3.5-turbo for chatbot functionality
+    const response = await openai.chat.completions.create({
+      model: 'gpt-3.5-turbo',
+      messages: [
+        {
+          role: 'system',
+          content: `You are a helpful study assistant for SplanAI, an app that helps students learn from their notes, documents, and images.
+            SplanAI can create summaries, flashcards, and quizzes from uploaded content.
+            Be friendly, concise, and helpful. If you don't know something, suggest using the app's features instead.
+            Keep responses under 150 words to fit nicely in the chat interface.`
+        },
+        { role: 'user', content: message }
+      ],
+      temperature: 0.7,
+      max_tokens: 300
+    });
+    
+    const reply = response.choices[0]?.message?.content?.trim() || 
+      "I'm sorry, I couldn't process your request. Please try again.";
+    
+    // Save chat history if connected to database and sessionId provided
+    if (mongoose.connection.readyState === 1 && sessionId) {
+      try {
+        // Find or create a chat history document
+        await ChatHistory.findOneAndUpdate(
+          { sessionId },
+          { 
+            $push: { 
+              messages: [
+                { role: 'user', content: message },
+                { role: 'assistant', content: reply }
+              ]
+            },
+            $setOnInsert: { createdAt: new Date() },
+            $set: { updatedAt: new Date() }
+          },
+          { upsert: true, new: true }
+        );
+      } catch (dbError) {
+        console.error('Error saving chat history:', dbError);
+      }
+    }
+    
+    res.json({ reply });
+  } catch (error) {
+    console.error('Chatbot error:', error);
+    res.status(500).json({ 
+      error: 'Error processing your message',
+      details: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+});
+
 // Support for both production and development environments
 if (process.env.NODE_ENV === 'production') {
   // Serve static files from the React app
@@ -1044,4 +1183,12 @@ if (process.env.NODE_ENV === 'production') {
   app.get('/', (req, res) => {
     res.sendFile(path.join(__dirname, 'public', 'index.html'));
   });
+}
+
+function extractJSONFromString(str) {
+  try {
+    return JSON.parse(str);
+  } catch (e) {
+    return str;
+  }
 }

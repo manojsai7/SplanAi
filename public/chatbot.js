@@ -116,26 +116,26 @@ function addUserMessage(text) {
 }
 
 function noHelpResponse() {
-    addBotMessage("No worries! I'm here whenever you need me.");
+    addBotMessage("Feel free to ask if you need anything. Happy studying!");
 }
 
 function sendMessage() {
-    var userInput = document.getElementById("user-input");
-    var message = userInput.value.trim();
+    var input = document.getElementById("user-input");
+    var message = input.value.trim();
     
-    if (message) {
-        addUserMessage(message);
-        userInput.value = '';
-        
-        // Show typing indicator
-        showTypingIndicator();
-        
-        // Process the message and respond
-        setTimeout(() => {
-            hideTypingIndicator();
-            processUserMessage(message);
-        }, 1000);
-    }
+    if (message === "") return;
+    
+    // Clear input field
+    input.value = "";
+    
+    // Display user message
+    addUserMessage(message);
+    
+    // Show typing indicator
+    showTypingIndicator();
+    
+    // Process message and get response from OpenAI API
+    processUserMessage(message);
 }
 
 function handleKeyPress(event) {
@@ -146,14 +146,11 @@ function handleKeyPress(event) {
 
 function showTypingIndicator() {
     var chatMessages = document.getElementById("chat-messages");
-    var typingIndicator = document.createElement("p");
-    typingIndicator.className = "bot-message typing";
+    var typingIndicator = document.createElement("div");
     typingIndicator.id = "typing-indicator";
-    typingIndicator.innerHTML = "SplanAI is typing...";
+    typingIndicator.className = "typing-indicator";
+    typingIndicator.innerHTML = "<span></span><span></span><span></span>";
     chatMessages.appendChild(typingIndicator);
-    typingIndicator.style.display = "block";
-    
-    // Auto-scroll to the bottom
     chatMessages.scrollTop = chatMessages.scrollHeight;
 }
 
@@ -164,24 +161,47 @@ function hideTypingIndicator() {
     }
 }
 
-function processUserMessage(message) {
-    // Simple keyword-based responses
-    const messageLower = message.toLowerCase();
-    
-    if (messageLower.includes("flashcard") || messageLower.includes("card")) {
-        informUserToStart("Flashcards");
-    } else if (messageLower.includes("quiz") || messageLower.includes("test")) {
-        informUserToStart("Quiz");
-    } else if (messageLower.includes("summary") || messageLower.includes("summarize")) {
-        informUserToStart("Summary");
-    } else if (messageLower.includes("help") || messageLower.includes("how")) {
-        showServices();
-    } else if (messageLower.includes("thank")) {
-        addBotMessage("You're welcome! Happy to help.");
-    } else {
-        // Default response
-        addBotMessage("I can help you create study materials from your content. What would you like to do?");
-        addServiceButtons();
+// Update to use our OpenAI API endpoint
+async function processUserMessage(message) {
+    try {
+        // Get or create a session ID
+        let sessionId = localStorage.getItem('chatSessionId');
+        if (!sessionId) {
+            sessionId = Date.now().toString() + Math.random().toString(36).substring(2, 8);
+            localStorage.setItem('chatSessionId', sessionId);
+        }
+        
+        // Call the chatbot API
+        const response = await fetch('/api/chatbot', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+                message: message,
+                sessionId: sessionId
+            })
+        });
+        
+        if (!response.ok) {
+            throw new Error('Network response was not ok');
+        }
+        
+        const data = await response.json();
+        
+        // Hide typing indicator
+        hideTypingIndicator();
+        
+        // Display bot response
+        addBotMessage(data.reply);
+    } catch (error) {
+        console.error('Error:', error);
+        
+        // Hide typing indicator
+        hideTypingIndicator();
+        
+        // Display error message
+        addBotMessage("I'm sorry, I couldn't process your message. Please try again later.");
     }
 }
 
@@ -191,8 +211,13 @@ document.addEventListener("DOMContentLoaded", function() {
     if (document.getElementById("user-input")) {
         document.getElementById("user-input").addEventListener("keypress", handleKeyPress);
     }
-    
     if (document.getElementById("send-button")) {
         document.getElementById("send-button").addEventListener("click", sendMessage);
+    }
+    
+    // Create a unique session ID for this chat session
+    if (!localStorage.getItem('chatSessionId')) {
+        const sessionId = Date.now().toString() + Math.random().toString(36).substring(2, 8);
+        localStorage.setItem('chatSessionId', sessionId);
     }
 });
