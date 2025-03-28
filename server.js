@@ -17,6 +17,10 @@ const session = require('express-session');
 const MongoStore = require('connect-mongo');
 const PDFDocument = require('pdfkit');
 
+// Initialize Express App
+const app = express();
+const PORT = process.env.PORT || 3000;
+
 // Validate and format MongoDB URI
 const getValidMongoDBURI = (uri) => {
   if (!uri) {
@@ -26,82 +30,139 @@ const getValidMongoDBURI = (uri) => {
   
   // Check if URI already has the correct format
   if (uri.startsWith('mongodb://') || uri.startsWith('mongodb+srv://')) {
-    // For URIs with the correct protocol, let's make sure the password is properly encoded
-    try {
-      // Parse the URI to identify username, password and host
-      const uriParts = uri.split('://')[1];
-      const authAndRest = uriParts.split('@');
-      
-      // If there's no @ sign or multiple @ signs, it's a malformed URI
-      if (authAndRest.length !== 2) {
-        throw new Error('Malformed MongoDB URI');
-      }
-      
-      const auth = authAndRest[0];
-      const rest = authAndRest[1];
-      
-      // Split auth into username and password
-      const authParts = auth.split(':');
-      if (authParts.length !== 2) {
-        throw new Error('Malformed authentication in MongoDB URI');
-      }
-      
-      const username = authParts[0];
-      const password = authParts[1];
-      
-      // Encode the password - this handles special characters that might cause issues
-      const encodedPassword = encodeURIComponent(password);
-      
-      // Reconstruct the URI with encoded password
-      return `mongodb${uri.startsWith('mongodb+srv') ? '+srv' : ''}://${username}:${encodedPassword}@${rest}`;
-    } catch (error) {
-      console.error('Error processing MongoDB URI:', error.message);
-      // Return the original URI if we can't parse it
-      return uri;
-    }
+    return uri;
   }
   
-  // Try to format the URI if it's missing the protocol
+  // If it's not in the correct format but looks like a MongoDB URI, add the prefix
   if (uri.includes('@') && (uri.includes('.mongodb.net') || uri.includes('.mongo.cosmos'))) {
-    // Similar process for URIs without protocol
-    try {
-      const authAndRest = uri.split('@');
-      if (authAndRest.length !== 2) {
-        throw new Error('Malformed MongoDB URI');
-      }
-      
-      const auth = authAndRest[0];
-      const rest = authAndRest[1];
-      
-      const authParts = auth.split(':');
-      if (authParts.length !== 2) {
-        throw new Error('Malformed authentication in MongoDB URI');
-      }
-      
-      const username = authParts[0];
-      const password = authParts[1];
-      
-      // Encode the password
-      const encodedPassword = encodeURIComponent(password);
-      
-      // Reconstruct the URI with encoded password
-      const protocol = uri.includes('.mongodb.net') ? 'mongodb+srv' : 'mongodb';
-      return `${protocol}://${username}:${encodedPassword}@${rest}`;
-    } catch (error) {
-      console.error('Error processing MongoDB URI:', error.message);
-    }
+    return `mongodb+srv://${uri}`;
   }
   
   console.error('Invalid MongoDB URI format, unable to automatically correct');
   return null;
 };
 
+// AI Clients Configuration
+let visionClient;
+try {
+  // Check if running on Heroku (where we'd use the JSON string in env var)
+  if (process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON) {
+    try {
+      // Make sure we parse valid JSON - try different approaches to handle various formats
+      let credentials;
+      const credentialString = process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON;
+      
+      // First, try direct parsing
+      try {
+        credentials = JSON.parse(credentialString);
+        console.log('Successfully parsed Google credentials directly');
+      } catch (parseError) {
+        console.log('Direct parsing failed, trying alternative methods');
+        
+        // If direct parsing fails, it might be double-quoted or have escape characters
+        try {
+          // If it's a quoted string (common when setting in Heroku)
+          if (credentialString.startsWith('"') || credentialString.startsWith("'")) {
+            // Remove outer quotes and try to parse
+            const unquoted = credentialString.replace(/^['"]|['"]$/g, '');
+            credentials = JSON.parse(unquoted);
+            console.log('Successfully parsed Google credentials after removing quotes');
+          } else {
+            // Try replacing escaped newlines and other common issues
+            const cleaned = credentialString
+              .replace(/\\n/g, '')
+              .replace(/\\/g, '')
+              .replace(/"{/g, '{')
+              .replace(/}"/g, '}');
+            credentials = JSON.parse(cleaned);
+            console.log('Successfully parsed Google credentials after cleaning string');
+          }
+        } catch (altParseError) {
+          // If all parsing attempts fail, check if it's a Base64 encoded string
+          try {
+            if (/^[A-Za-z0-9+/=]+$/.test(credentialString)) {
+              const decoded = Buffer.from(credentialString, 'base64').toString('utf-8');
+              credentials = JSON.parse(decoded);
+              console.log('Successfully parsed Google credentials from Base64');
+            } else {
+              throw new Error('Unable to parse credentials in any format');
+            }
+          } catch (b64Error) {
+            console.error('All parsing methods failed:', b64Error.message);
+            throw new Error('Unable to parse Google credentials JSON');
+          }
+        }
+      }
+      
+      // Validate that we have the minimum required fields for a service account
+      if (!credentials || !credentials.type || !credentials.project_id) {
+        throw new Error('Invalid Google credentials format - missing required fields');
+      }
+      
+      visionClient = new ImageAnnotatorClient({ credentials });
+      console.log('Vision API client initialized successfully with JSON credentials');
+    } catch (jsonError) {
+      console.error('Error processing Google credentials:', jsonError.message);
+      // Create a fallback client
+      visionClient = createMockVisionClient();
+    }
+  } else if (process.env.GOOGLE_APPLICATION_CREDENTIALS) {
+    // Local development (where we use the file path)
+    try {
+      visionClient = new ImageAnnotatorClient({
+        keyFilename: process.env.GOOGLE_APPLICATION_CREDENTIALS
+      });
+      console.log('Vision API client initialized successfully with keyfile');
+    } catch (fileError) {
+      console.error('Error loading Google credentials file:', fileError.message);
+      visionClient = createMockVisionClient();
+    }
+  } else {
+    console.warn('No Google Cloud credentials provided, using mock client');
+    visionClient = createMockVisionClient();
+  }
+} catch (error) {
+  console.error('Error initializing Vision client:', error);
+  visionClient = createMockVisionClient();
+}
+
+// Create a mock Vision client for fallback
+function createMockVisionClient() {
+  console.warn('Using mock Vision API client - OCR functionality will be limited');
+  return {
+    documentTextDetection: async () => {
+      console.warn('Called mock documentTextDetection');
+      return [{ fullTextAnnotation: { text: 'Mock OCR text for testing. Please check your Google Cloud Vision API configuration.' } }];
+    }
+  };
+}
+
+// Initialize OpenAI API client
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+  timeout: 30000,
+  maxRetries: 3
+});
+
 // Enhanced MongoDB Atlas Connection
 const connectDB = async () => {
   try {
-    const mongoUri = getValidMongoDBURI(process.env.MONGODB_URI);
+    // Ensure MongoDB URI is valid
+    let mongoUri = process.env.MONGODB_URI;
+    
+    // Ensure the URI has the correct prefix
     if (!mongoUri) {
-      throw new Error('Invalid MongoDB URI. Please check your environment variables.');
+      throw new Error('MongoDB URI is not provided in environment variables');
+    }
+    
+    if (!mongoUri.startsWith('mongodb://') && !mongoUri.startsWith('mongodb+srv://')) {
+      // Try adding the prefix if it looks like a MongoDB URI
+      if (mongoUri.includes('@') && mongoUri.includes('.mongodb.net')) {
+        mongoUri = `mongodb+srv://${mongoUri}`;
+        console.log('Added MongoDB protocol prefix to URI');
+      } else {
+        throw new Error('Invalid MongoDB URI format. Must start with mongodb:// or mongodb+srv://');
+      }
     }
     
     await mongoose.connect(mongoUri, {
@@ -110,7 +171,8 @@ const connectDB = async () => {
       retryWrites: true,
       w: 'majority'
     });
-    console.log('MongoDB Connected with Advanced Configuration');
+    
+    console.log('MongoDB Connected successfully');
   } catch (err) {
     console.error('Database Connection Error:', err);
     // Don't exit process in production - let the app continue without DB
@@ -119,58 +181,22 @@ const connectDB = async () => {
     }
   }
 };
+
+// Call connectDB but don't wait - we'll handle connection failures gracefully
 connectDB();
 
-// AI Clients Configuration
-let visionClient;
-try {
-  // Check if running on Heroku (where we'd use the JSON string in env var)
-  if (process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON) {
-    visionClient = new ImageAnnotatorClient({
-      credentials: JSON.parse(process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON)
-    });
-  } else {
-    // Local development (where we use the file path)
-    visionClient = new ImageAnnotatorClient({
-      keyFilename: process.env.GOOGLE_APPLICATION_CREDENTIALS
-    });
-  }
-  console.log('Vision API client initialized successfully');
-} catch (error) {
-  console.error('Error initializing Vision client:', error);
-  // Create a dummy client for testing without failing the app
-  visionClient = {
-    documentTextDetection: async () => {
-      console.warn('Using mock Vision API client');
-      return [{ fullTextAnnotation: { text: 'Mock OCR text for testing' } }];
-    }
-  };
-}
+// =================== MIDDLEWARE ===================
 
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-  timeout: 30000,
-  maxRetries: 3
-});
-
-// Express App Configuration
-const app = express();
-app.use(express.json()); // Support for JSON payloads
-const upload = multer({
-  storage: multer.memoryStorage(),
-  limits: { fileSize: 20 * 1024 * 1024 } // Limit file size to 20MB
-});
-
-// Advanced Security Middleware
+// Security configuration
 app.use(helmet({
   contentSecurityPolicy: {
     directives: {
       defaultSrc: ["'self'"],
+      connectSrc: ["'self'", 'https://*.openai.com'],
       scriptSrc: ["'self'", "'unsafe-inline'"],
-      styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com", "https://cdnjs.cloudflare.com"],
-      fontSrc: ["'self'", "https://fonts.gstatic.com", "https://cdnjs.cloudflare.com"],
-      imgSrc: ["'self'", "data:"],
-      connectSrc: ["'self'"]
+      styleSrc: ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com', 'https://cdnjs.cloudflare.com'],
+      fontSrc: ["'self'", 'https://fonts.gstatic.com', 'https://cdnjs.cloudflare.com'],
+      imgSrc: ["'self'", 'data:', 'https://cdn-icons-png.flaticon.com'],
     },
   },
 }));
@@ -189,14 +215,29 @@ app.use(session({
   resave: false,
   saveUninitialized: false,
   store: MongoStore.create({
-    mongoUrl: process.env.MONGODB_URI,
-    collectionName: 'sessions'
+    mongoUrl: process.env.MONGODB_URI, // Use raw value - MongoStore has its own validation
+    collectionName: 'sessions',
+    ttl: 60 * 60 * 24 * 7, // 1 week
+    autoRemove: 'native',
+    touchAfter: 24 * 3600, // Only update the session once per day
+    crypto: {
+      secret: process.env.SESSION_SECRET || 'splanAI-super-secret'
+    },
+    stringify: false,
+    autoReconnect: true
   }),
   cookie: {
     secure: process.env.NODE_ENV === 'production',
     maxAge: 1000 * 60 * 60 * 24 * 7 // 1 week
   }
 }));
+
+// Express App Configuration
+app.use(express.json()); // Support for JSON payloads
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 20 * 1024 * 1024 } // Limit file size to 20MB
+});
 
 // Add basic health check endpoint
 app.get('/health', (req, res) => {
@@ -891,7 +932,6 @@ if (process.env.NODE_ENV === 'production') {
 }
 
 // Server Start with proper error handling
-const PORT = process.env.PORT || 3000;
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`Server running on port ${PORT} in ${process.env.NODE_ENV || 'development'} mode`);
 });
