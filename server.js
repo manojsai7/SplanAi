@@ -1438,6 +1438,241 @@ const auth = async (req, res, next) => {
       }
     });
 
+    // Generate flashcards endpoint
+    app.post('/api/generate-flashcards', express.json(), async (req, res) => {
+      try {
+        console.log('📚 Flashcards generation request received', req.body);
+        
+        const { sessionId } = req.body;
+        
+        if (!sessionId) {
+          return res.status(400).json({ error: 'Session ID is required' });
+        }
+        
+        // Find content by session ID
+        const content = await Content.findOne({ sessionId });
+        
+        if (!content) {
+          return res.status(404).json({ error: 'Content not found for this session' });
+        }
+        
+        // Get the content text
+        const contentText = content.text || content.summary || '';
+        
+        if (!contentText) {
+          return res.status(400).json({ error: 'No content available to generate flashcards' });
+        }
+        
+        // Generate flashcards using our robust AI response function
+        const prompt = `
+          Generate 10 flashcards from the following content. 
+          Each flashcard should have a question and an answer.
+          Format the output as a JSON array of objects, each with 'question' and 'answer' properties.
+          Make the questions challenging but concise.
+          
+          Content:
+          ${contentText.substring(0, Math.min(contentText.length, 10000))}
+        `;
+        
+        const response = await getAIResponse(prompt, {
+          temperature: 0.7,
+          maxOutputTokens: 2048
+        });
+        
+        const responseText = response.text;
+        
+        // Parse the response to extract the JSON
+        let flashcardsJson;
+        try {
+          // Find JSON in the response
+          const jsonMatch = responseText.match(/\[\s*\{.*\}\s*\]/s);
+          
+          if (jsonMatch) {
+            flashcardsJson = JSON.parse(jsonMatch[0]);
+          } else {
+            // Try to parse the entire response as JSON
+            flashcardsJson = JSON.parse(responseText);
+          }
+          
+          // Validate the structure
+          if (!Array.isArray(flashcardsJson)) {
+            throw new Error('Response is not an array');
+          }
+          
+          // Ensure each item has question and answer
+          flashcardsJson = flashcardsJson.filter(card => 
+            card && typeof card === 'object' && 
+            typeof card.question === 'string' && 
+            typeof card.answer === 'string'
+          );
+          
+          if (flashcardsJson.length === 0) {
+            throw new Error('No valid flashcards found');
+          }
+        } catch (parseError) {
+          console.error('Error parsing flashcards JSON:', parseError);
+          
+          // Fallback: Extract Q&A pairs manually
+          const pairs = responseText.split(/\n\s*\n/).filter(p => p.trim());
+          flashcardsJson = [];
+          
+          for (const pair of pairs) {
+            const qMatch = pair.match(/Q(?:uestion)?:?\s*(.*?)(?:\n|$)/i);
+            const aMatch = pair.match(/A(?:nswer)?:?\s*(.*?)(?:\n|$)/i);
+            
+            if (qMatch && aMatch) {
+              flashcardsJson.push({
+                question: qMatch[1].trim(),
+                answer: aMatch[1].trim()
+              });
+            }
+          }
+          
+          if (flashcardsJson.length === 0) {
+            return res.status(500).json({ 
+              error: 'Failed to parse flashcards', 
+              message: 'The AI generated an invalid response format'
+            });
+          }
+        }
+        
+        // Save flashcards to the database
+        content.flashcards = flashcardsJson;
+        await content.save();
+        
+        console.log(`✅ Generated ${flashcardsJson.length} flashcards successfully`);
+        
+        return res.status(200).json({ 
+          message: 'Flashcards generated successfully',
+          flashcards: flashcardsJson
+        });
+      } catch (error) {
+        console.error('❌ Error generating flashcards:', error);
+        return res.status(500).json({ 
+          error: 'Failed to generate flashcards', 
+          message: error.message
+        });
+      }
+    });
+
+    // Generate quiz endpoint
+    app.post('/api/generate-quiz', express.json(), async (req, res) => {
+      try {
+        console.log('🧠 Quiz generation request received', req.body);
+        
+        const { sessionId } = req.body;
+        
+        if (!sessionId) {
+          return res.status(400).json({ error: 'Session ID is required' });
+        }
+        
+        // Find content by session ID
+        const content = await Content.findOne({ sessionId });
+        
+        if (!content) {
+          return res.status(404).json({ error: 'Content not found for this session' });
+        }
+        
+        // Get the content text
+        const contentText = content.text || content.summary || '';
+        
+        if (!contentText) {
+          return res.status(400).json({ error: 'No content available to generate quiz' });
+        }
+        
+        // Generate quiz using our robust AI response function
+        const prompt = `
+          Generate a quiz with 5 multiple-choice questions from the following content.
+          Each question should have 4 options (A, B, C, D) with one correct answer.
+          Format the output as a JSON array of objects, each with 'question', 'options' (array of 4 strings), and 'correctAnswer' (index 0-3) properties.
+          
+          Content:
+          ${contentText.substring(0, Math.min(contentText.length, 10000))}
+        `;
+        
+        const response = await getAIResponse(prompt, {
+          temperature: 0.7,
+          maxOutputTokens: 2048
+        });
+        
+        const responseText = response.text;
+        
+        // Parse the response to extract the JSON
+        let quizJson;
+        try {
+          // Find JSON in the response
+          const jsonMatch = responseText.match(/\[\s*\{.*\}\s*\]/s);
+          
+          if (jsonMatch) {
+            quizJson = JSON.parse(jsonMatch[0]);
+          } else {
+            // Try to parse the entire response as JSON
+            quizJson = JSON.parse(responseText);
+          }
+          
+          // Validate the structure
+          if (!Array.isArray(quizJson)) {
+            throw new Error('Response is not an array');
+          }
+          
+          // Ensure each item has required properties
+          quizJson = quizJson.filter(q => 
+            q && typeof q === 'object' && 
+            typeof q.question === 'string' && 
+            Array.isArray(q.options) && 
+            q.options.length === 4 &&
+            (typeof q.correctAnswer === 'number' || typeof q.correctAnswer === 'string')
+          );
+          
+          // Normalize correctAnswer to be a number
+          quizJson = quizJson.map(q => {
+            if (typeof q.correctAnswer === 'string') {
+              // Handle letter answers (A, B, C, D)
+              const index = q.correctAnswer.toUpperCase().charCodeAt(0) - 65;
+              if (index >= 0 && index <= 3) {
+                q.correctAnswer = index;
+              } else {
+                // Try to parse as number
+                q.correctAnswer = parseInt(q.correctAnswer, 10);
+                // Ensure it's in range
+                if (isNaN(q.correctAnswer) || q.correctAnswer < 0 || q.correctAnswer > 3) {
+                  q.correctAnswer = 0;
+                }
+              }
+            }
+            return q;
+          });
+          
+          if (quizJson.length === 0) {
+            throw new Error('No valid quiz questions found');
+          }
+        } catch (parseError) {
+          console.error('Error parsing quiz JSON:', parseError);
+          return res.status(500).json({ 
+            error: 'Failed to parse quiz', 
+            message: 'The AI generated an invalid response format'
+          });
+        }
+        
+        // Save quiz to the database
+        content.quizzes = quizJson;
+        await content.save();
+        
+        console.log(`✅ Generated ${quizJson.length} quiz questions successfully`);
+        
+        return res.status(200).json({ 
+          message: 'Quiz generated successfully',
+          quiz: quizJson
+        });
+      } catch (error) {
+        console.error('❌ Error generating quiz:', error);
+        return res.status(500).json({ 
+          error: 'Failed to generate quiz', 
+          message: error.message
+        });
+      }
+    });
+    
     // Start the server after all setup is complete
     app.listen(PORT, () => {
       console.log(`✅ Server running on port ${PORT} in ${process.env.NODE_ENV || 'development'} mode`);
@@ -1485,6 +1720,7 @@ const processTextContent = async (text, sessionId, metadata = {}, userId = null)
       
       // Create content object
       const contentObj = {
+        sessionId: sessionId, // Ensure sessionId is included in the content object
         title: metadata.title || 'Untitled Document',
         text: text,
         summary: summaryResponse.text,
@@ -1776,238 +2012,3 @@ function extractJSONFromString(str) {
     return '[]';
   }
 }
-
-// Generate flashcards endpoint
-app.post('/api/generate-flashcards', express.json(), async (req, res) => {
-  try {
-    console.log('📚 Flashcards generation request received', req.body);
-    
-    const { sessionId } = req.body;
-    
-    if (!sessionId) {
-      return res.status(400).json({ error: 'Session ID is required' });
-    }
-    
-    // Find content by session ID
-    const content = await Content.findOne({ sessionId });
-    
-    if (!content) {
-      return res.status(404).json({ error: 'Content not found for this session' });
-    }
-    
-    // Get the content text
-    const contentText = content.text || content.summary || '';
-    
-    if (!contentText) {
-      return res.status(400).json({ error: 'No content available to generate flashcards' });
-    }
-    
-    // Generate flashcards using our robust AI response function
-    const prompt = `
-      Generate 10 flashcards from the following content. 
-      Each flashcard should have a question and an answer.
-      Format the output as a JSON array of objects, each with 'question' and 'answer' properties.
-      Make the questions challenging but concise.
-      
-      Content:
-      ${contentText.substring(0, Math.min(contentText.length, 10000))}
-    `;
-    
-    const response = await getAIResponse(prompt, {
-      temperature: 0.7,
-      maxOutputTokens: 2048
-    });
-    
-    const responseText = response.text;
-    
-    // Parse the response to extract the JSON
-    let flashcardsJson;
-    try {
-      // Find JSON in the response
-      const jsonMatch = responseText.match(/\[\s*\{.*\}\s*\]/s);
-      
-      if (jsonMatch) {
-        flashcardsJson = JSON.parse(jsonMatch[0]);
-      } else {
-        // Try to parse the entire response as JSON
-        flashcardsJson = JSON.parse(responseText);
-      }
-      
-      // Validate the structure
-      if (!Array.isArray(flashcardsJson)) {
-        throw new Error('Response is not an array');
-      }
-      
-      // Ensure each item has question and answer
-      flashcardsJson = flashcardsJson.filter(card => 
-        card && typeof card === 'object' && 
-        typeof card.question === 'string' && 
-        typeof card.answer === 'string'
-      );
-      
-      if (flashcardsJson.length === 0) {
-        throw new Error('No valid flashcards found');
-      }
-    } catch (parseError) {
-      console.error('Error parsing flashcards JSON:', parseError);
-      
-      // Fallback: Extract Q&A pairs manually
-      const pairs = responseText.split(/\n\s*\n/).filter(p => p.trim());
-      flashcardsJson = [];
-      
-      for (const pair of pairs) {
-        const qMatch = pair.match(/Q(?:uestion)?:?\s*(.*?)(?:\n|$)/i);
-        const aMatch = pair.match(/A(?:nswer)?:?\s*(.*?)(?:\n|$)/i);
-        
-        if (qMatch && aMatch) {
-          flashcardsJson.push({
-            question: qMatch[1].trim(),
-            answer: aMatch[1].trim()
-          });
-        }
-      }
-      
-      if (flashcardsJson.length === 0) {
-        return res.status(500).json({ 
-          error: 'Failed to parse flashcards', 
-          message: 'The AI generated an invalid response format'
-        });
-      }
-    }
-    
-    // Save flashcards to the database
-    content.flashcards = flashcardsJson;
-    await content.save();
-    
-    console.log(`✅ Generated ${flashcardsJson.length} flashcards successfully`);
-    
-    return res.status(200).json({ 
-      message: 'Flashcards generated successfully',
-      flashcards: flashcardsJson
-    });
-  } catch (error) {
-    console.error('❌ Error generating flashcards:', error);
-    return res.status(500).json({ 
-      error: 'Failed to generate flashcards', 
-      message: error.message
-    });
-  }
-});
-
-// Generate quiz endpoint
-app.post('/api/generate-quiz', express.json(), async (req, res) => {
-  try {
-    console.log('🧠 Quiz generation request received', req.body);
-    
-    const { sessionId } = req.body;
-    
-    if (!sessionId) {
-      return res.status(400).json({ error: 'Session ID is required' });
-    }
-    
-    // Find content by session ID
-    const content = await Content.findOne({ sessionId });
-    
-    if (!content) {
-      return res.status(404).json({ error: 'Content not found for this session' });
-    }
-    
-    // Get the content text
-    const contentText = content.text || content.summary || '';
-    
-    if (!contentText) {
-      return res.status(400).json({ error: 'No content available to generate quiz' });
-    }
-    
-    // Generate quiz using our robust AI response function
-    const prompt = `
-      Generate a quiz with 5 multiple-choice questions from the following content.
-      Each question should have 4 options (A, B, C, D) with one correct answer.
-      Format the output as a JSON array of objects, each with 'question', 'options' (array of 4 strings), and 'correctAnswer' (index 0-3) properties.
-      
-      Content:
-      ${contentText.substring(0, Math.min(contentText.length, 10000))}
-    `;
-    
-    const response = await getAIResponse(prompt, {
-      temperature: 0.7,
-      maxOutputTokens: 2048
-    });
-    
-    const responseText = response.text;
-    
-    // Parse the response to extract the JSON
-    let quizJson;
-    try {
-      // Find JSON in the response
-      const jsonMatch = responseText.match(/\[\s*\{.*\}\s*\]/s);
-      
-      if (jsonMatch) {
-        quizJson = JSON.parse(jsonMatch[0]);
-      } else {
-        // Try to parse the entire response as JSON
-        quizJson = JSON.parse(responseText);
-      }
-      
-      // Validate the structure
-      if (!Array.isArray(quizJson)) {
-        throw new Error('Response is not an array');
-      }
-      
-      // Ensure each item has required properties
-      quizJson = quizJson.filter(q => 
-        q && typeof q === 'object' && 
-        typeof q.question === 'string' && 
-        Array.isArray(q.options) && 
-        q.options.length === 4 &&
-        (typeof q.correctAnswer === 'number' || typeof q.correctAnswer === 'string')
-      );
-      
-      // Normalize correctAnswer to be a number
-      quizJson = quizJson.map(q => {
-        if (typeof q.correctAnswer === 'string') {
-          // Handle letter answers (A, B, C, D)
-          const index = q.correctAnswer.toUpperCase().charCodeAt(0) - 65;
-          if (index >= 0 && index <= 3) {
-            q.correctAnswer = index;
-          } else {
-            // Try to parse as number
-            q.correctAnswer = parseInt(q.correctAnswer, 10);
-            // Ensure it's in range
-            if (isNaN(q.correctAnswer) || q.correctAnswer < 0 || q.correctAnswer > 3) {
-              q.correctAnswer = 0;
-            }
-          }
-        }
-        return q;
-      });
-      
-      if (quizJson.length === 0) {
-        throw new Error('No valid quiz questions found');
-      }
-    } catch (parseError) {
-      console.error('Error parsing quiz JSON:', parseError);
-      return res.status(500).json({ 
-        error: 'Failed to parse quiz', 
-        message: 'The AI generated an invalid response format'
-      });
-    }
-    
-    // Save quiz to the database
-    content.quiz = quizJson;
-    await content.save();
-    
-    console.log(`✅ Generated ${quizJson.length} quiz questions successfully`);
-    
-    return res.status(200).json({ 
-      message: 'Quiz generated successfully',
-      quiz: quizJson
-    });
-  } catch (error) {
-    console.error('❌ Error generating quiz:', error);
-    return res.status(500).json({ 
-      error: 'Failed to generate quiz', 
-      message: error.message
-    });
-  }
-});
