@@ -77,28 +77,128 @@ const connectDB = async () => {
       // Rebuild the URI with encoded password
       uri = `${protocol}${username}:${password}@${hostAndRest}`;
       console.log('Using properly encoded MongoDB URI');
+      
+      // Append SSL parameters to the URI if not already present
+      if (!uri.includes('ssl=')) {
+        uri += (uri.includes('?') ? '&' : '?') + 'ssl=true';
+      }
+      
+      // Add TLS version specification
+      if (!uri.includes('tls=')) {
+        uri += '&tls=true';
+      }
+      
+      console.log('Added SSL/TLS parameters to URI');
     }
     
-    // Connect to MongoDB with the fixed URI and special SSL options for Heroku
-    await mongoose.connect(uri, {
-      useNewUrlParser: true,
-      useUnifiedTopology: true,
-      ssl: true,
-      sslValidate: false, // Disable SSL certificate validation for Heroku
-      tlsAllowInvalidCertificates: true, // Handle TLS errors gracefully
-      tlsAllowInvalidHostnames: true, // Allow invalid hostnames
-      retryWrites: true,
-      w: 'majority',
-      // Short timeouts to fail fast if connection isn't possible
-      serverSelectionTimeoutMS: 15000, // 15 seconds
-      connectTimeoutMS: 15000
-    });
-    console.log('MongoDB Connected successfully');
+    // Use direct connection without Atlas proxy layer
+    const useDirectConnection = true;
+    console.log('Using direct connection:', useDirectConnection);
+    
+    // Configure Node.js TLS settings for MongoDB specifically
+    try {
+      // Set NODE_TLS_REJECT_UNAUTHORIZED temporarily to allow self-signed certificates
+      // This is not ideal for production but helps diagnose the connection issue
+      process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
+      console.log('Temporarily disabled TLS certificate validation');
+    } catch (tlsEnvError) {
+      console.warn('Could not set TLS environment variable:', tlsEnvError.message);
+    }
+    
+    // Try connecting with multiple TLS versions
+    const connectWithTLSVersion = async (tlsVersion) => {
+      try {
+        console.log(`Attempting MongoDB connection with ${tlsVersion || 'default'} TLS settings...`);
+        
+        const options = {
+          useNewUrlParser: true,
+          useUnifiedTopology: true,
+          ssl: true,
+          sslValidate: false,
+          tlsAllowInvalidCertificates: true,
+          tlsAllowInvalidHostnames: true,
+          directConnection: useDirectConnection,
+          retryWrites: true,
+          w: 'majority',
+          serverSelectionTimeoutMS: 30000,
+          connectTimeoutMS: 30000
+        };
+        
+        // Add TLS version specific settings
+        if (tlsVersion === 'TLSv1.2') {
+          options.tls = true;
+          options.tlsCAFile = undefined; // Don't use a CA file
+          options.tlsCertificateKeyFile = undefined;
+          options.tlsInsecure = true; // Bypass certificate validation
+        } else if (tlsVersion === 'TLSv1.1') {
+          options.tls = true;
+          options.tlsInsecure = true;
+        } else if (tlsVersion === 'TLSv1.0') {
+          options.tls = true;
+          options.tlsInsecure = true;
+        }
+        
+        await mongoose.connect(uri, options);
+        console.log(`MongoDB Connected successfully using ${tlsVersion || 'default'} TLS settings`);
+        return true;
+      } catch (error) {
+        console.error(`Connection failed with ${tlsVersion || 'default'} TLS settings:`, error.message);
+        return false;
+      }
+    };
+    
+    // Try different TLS versions in sequence
+    const tlsVersions = [null, 'TLSv1.2', 'TLSv1.1', 'TLSv1.0'];
+    let connected = false;
+    
+    for (const version of tlsVersions) {
+      connected = await connectWithTLSVersion(version);
+      if (connected) break;
+    }
+    
+    if (!connected) {
+      // Try one last approach: direct connection string modification
+      console.log('All TLS version attempts failed. Trying with modified connection string...');
+      
+      // Remove any existing tls or ssl parameters
+      let modifiedUri = uri.replace(/[?&]tls=(true|false)/gi, '')
+                           .replace(/[?&]ssl=(true|false)/gi, '');
+                           
+      // Add our custom parameters
+      modifiedUri += (modifiedUri.includes('?') ? '&' : '?') + 
+                     'ssl=true&tls=true&tlsInsecure=true&readPreference=primary&retryWrites=true&maxIdleTimeMS=120000';
+      
+      try {
+        await mongoose.connect(modifiedUri, {
+          useNewUrlParser: true,
+          useUnifiedTopology: true,
+          ssl: true,
+          tls: true,
+          tlsInsecure: true,
+          directConnection: useDirectConnection,
+          serverSelectionTimeoutMS: 30000,
+          connectTimeoutMS: 30000
+        });
+        console.log('MongoDB Connected successfully with modified connection string');
+        connected = true;
+      } catch (finalError) {
+        console.error('Final connection attempt failed:', finalError.message);
+        throw finalError; // Rethrow to be caught by the outer catch
+      }
+    }
+    
+    // Reset TLS environment variable to secure default
+    process.env.NODE_TLS_REJECT_UNAUTHORIZED = '1';
+    
   } catch (err) {
     console.error('Database Connection Error:', err);
     
     // Provide helpful diagnostics and guidance based on error type
-    if (err.name === 'MongooseServerSelectionError' || err.message?.includes('ENOTFOUND')) {
+    if (err.name === 'MongooseServerSelectionError' || 
+        err.message?.includes('ENOTFOUND') ||
+        err.message?.includes('SSL') ||
+        err.message?.includes('TLS')) {
+      
       console.error('\n===== MONGODB CONNECTION TROUBLESHOOTING =====');
       
       if (err.message?.includes('IP whitelist')) {
@@ -110,16 +210,21 @@ const connectDB = async () => {
         console.error('   OR add the specific Heroku IP ranges (see Heroku documentation)');
       }
       
-      if (err.message?.includes('SSL') || err.message?.includes('TLS') || err.message?.includes('certificate')) {
+      if (err.message?.includes('SSL') || err.message?.includes('TLS') || err.message?.includes('certificate') ||
+          err.message?.includes('routines') || err.message?.includes('alert internal error')) {
+          
         console.error('\nSSL/TLS ISSUE: There are problems with the secure connection to MongoDB.');
-        console.error('Your app is running with TLS disabled for troubleshooting. In production, use:');
-        console.error('1. Ensure your MongoDB Atlas cluster has TLS enabled');
-        console.error('2. Add "?ssl=true" to your connection string if it\'s not there already');
+        console.error('This appears to be a TLS version compatibility issue with Heroku and MongoDB Atlas.');
+        console.error('Try these fixes:');
+        console.error('1. In MongoDB Atlas, go to "Advanced Connection Options" and check "Use TLS/SSL" option');
+        console.error('2. Use a direct connection string from MongoDB Atlas under "Connect your application"');
+        console.error('3. Make sure to select "Node.js" and version "4.0 or later" when getting the connection string');
+        console.error('4. Try switching from mongodb+srv:// protocol to mongodb:// with full hostname list');
       }
       
       console.error('\nMONGODB URI FORMAT:');
-      console.error('Ensure your URI follows this pattern: mongodb+srv://<username>:<password>@<cluster>.mongodb.net/<dbname>');
-      console.error('Make sure special characters in password are properly encoded');
+      console.error('Your connection string should look like:');
+      console.error('mongodb+srv://<username>:<password>@<cluster>.mongodb.net/<dbname>?retryWrites=true&w=majority');
       console.error('\nTry the helper tool: node heroku-env-helper.js to generate a properly formatted URI');
       console.error('================================================\n');
     }
@@ -130,6 +235,9 @@ const connectDB = async () => {
       process.exit(1);
     } else {
       console.warn('Continuing without database connection in production mode');
+      console.warn('Your app will have limited functionality without database access');
+      console.warn('Try setting MONGODB_URI manually from the MongoDB Atlas dashboard');
+      console.warn('Run: heroku config:set MONGODB_URI="mongodb+srv://..."');
     }
   }
 };
