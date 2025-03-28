@@ -1,0 +1,14 @@
+This is a test document for SplanAI.
+
+SplanAI is a document analysis application that uses Google Cloud Vision for OCR and OpenAI for generating summaries, flashcards, and quizzes.
+
+The application connects to MongoDB Atlas for data storage and uses both Google Cloud Vision and OpenAI APIs for document processing.
+
+Key features include:
+1. Document upload and text extraction
+2. AI-powered summary generation
+3. Flashcard creation
+4. Quiz generation
+5. Chat interface for document-related questions
+
+This test document is being used to verify that the file upload and processing functionality is working correctly after fixing JSON parsing errors and improving error handling in the application.

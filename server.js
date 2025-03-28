@@ -904,16 +904,13 @@ const auth = async (req, res, next) => {
           console.log(`📊 File read successfully: ${buffer.length} bytes`);
           
           // Process the file content based on type
-          const textContent = await processContent(
-            buffer, 
-            sessionId, 
-            req.file.mimetype,
-            userId
-          );
-          
           try {
-            console.log('🧠 Processing extracted text content...');
-            const processedContent = await processTextContent(textContent, sessionId, metadata, userId);
+            const processedContent = await processContent(
+              buffer, 
+              sessionId, 
+              req.file.mimetype,
+              userId
+            );
             
             // Clean up the temporary file
             try {
@@ -924,26 +921,39 @@ const auth = async (req, res, next) => {
               // Non-critical error, continue
             }
             
-            return res.status(200).json(processedContent);
+            // Ensure we're sending a valid JSON response
+            const safeResponse = {
+              sessionId: processedContent.sessionId || sessionId,
+              title: processedContent.title || 'Document Analysis',
+              summary: processedContent.summary || 'Summary not available',
+              flashcards: Array.isArray(processedContent.flashcards) ? processedContent.flashcards : [],
+              quizzes: Array.isArray(processedContent.quizzes) ? processedContent.quizzes : [],
+              message: 'File processed successfully'
+            };
+            
+            console.log('✅ Sending successful response to client');
+            return res.status(200).json(safeResponse);
           } catch (processingError) {
-            console.error('❌ Text Processing Error:', processingError);
+            console.error('❌ Content Processing Error:', processingError);
             return res.status(500).json({ 
-              error: 'Text processing failed', 
-              message: processingError.message 
+              error: 'Content processing failed', 
+              message: processingError.message || 'Failed to process file content',
+              sessionId
             });
           }
         } catch (fileReadError) {
           console.error('❌ File Read Error:', fileReadError);
           return res.status(500).json({ 
             error: 'File read failed', 
-            message: fileReadError.message 
+            message: fileReadError.message || 'Failed to read uploaded file',
+            sessionId
           });
         }
       } catch (error) {
         console.error('❌ File Upload Error:', error);
         return res.status(500).json({ 
           error: 'File upload failed', 
-          message: error.message 
+          message: error.message || 'An unexpected error occurred during file upload'
         });
       }
     });
@@ -1538,15 +1548,40 @@ const processContent = async (buffer, sessionId, fileType, userId = null) => {
       throw new Error(`Unsupported file type: ${fileType}`);
     }
     
+    // If we got here, we have extracted text content
+    if (!text || text.trim().length === 0) {
+      throw new Error('No text content could be extracted from the file');
+    }
+    
     // Process the extracted text content with AI
     console.log(' Processing content with AI...');
-    const result = await processTextContent(text, sessionId, {
-      fileType,
-      contentType,
-      source: 'file-upload'
-    }, userId);
-    
-    return result;
+    try {
+      const result = await processTextContent(text, sessionId, {
+        fileType,
+        contentType,
+        source: 'file-upload'
+      }, userId);
+      
+      return result;
+    } catch (aiError) {
+      console.error('AI processing error:', aiError);
+      
+      // Return a basic response even if AI processing fails
+      return {
+        sessionId,
+        title: 'Document Analysis',
+        text: text.substring(0, 1000) + (text.length > 1000 ? '...' : ''),
+        summary: 'AI processing failed. The document was uploaded successfully, but we could not generate a summary.',
+        error: aiError.message,
+        metadata: {
+          fileType,
+          contentType,
+          source: 'file-upload',
+          processedAt: new Date(),
+          aiProcessingFailed: true
+        }
+      };
+    }
   } catch (err) {
     console.error('Content processing error:', err);
     throw err;

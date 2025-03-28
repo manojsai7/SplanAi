@@ -327,19 +327,43 @@ document.addEventListener('DOMContentLoaded', function() {
         body: formData
       });
       
-      if (!response.ok) {
-        const errorData = await response.json();
-        throw new Error(errorData.message || errorData.error || 'Failed to process file');
+      let data;
+      try {
+        // Try to parse the response as JSON
+        const responseText = await response.text();
+        
+        try {
+          // Attempt to parse the text as JSON
+          data = JSON.parse(responseText);
+        } catch (parseError) {
+          console.error('JSON parsing error:', parseError, 'Response text:', responseText);
+          
+          // Create a fallback response object
+          data = {
+            error: 'Invalid server response',
+            message: 'The server returned an invalid response that could not be processed.',
+            responseText: responseText.substring(0, 100) + (responseText.length > 100 ? '...' : '')
+          };
+          throw new Error('Failed to parse server response as JSON');
+        }
+      } catch (textError) {
+        console.error('Error reading response text:', textError);
+        throw new Error('Failed to read server response');
       }
       
-      const data = await response.json();
+      // Check if the response indicates an error
+      if (!response.ok || data.error) {
+        throw new Error(data.message || data.error || 'Failed to process file');
+      }
+      
+      // Process the successful response
       handleProcessedContent(data);
       
       showNotification('File processed successfully!', 'success');
       
       // Set document title if not already set
       if (documentTitle) {
-        documentTitle.textContent = file.name || 'Content Summary';
+        documentTitle.textContent = data.title || file.name || 'Content Summary';
       }
       
       // Switch to Summary tab
