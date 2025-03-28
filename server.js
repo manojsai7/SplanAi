@@ -675,13 +675,23 @@ const auth = async (req, res, next) => {
     // Apply session middleware after all configuration is done
     app.use(session(sessionConfig));
     
-    // Serve static files in production
+    // Support for both production and development environments
     if (process.env.NODE_ENV === 'production') {
+      // Serve static files from the React app
       app.use(express.static(path.join(__dirname, 'public')));
+      
+      // For any request that doesn't match one above, send back React's index.html file
+      app.get('*', (req, res) => {
+        res.sendFile(path.join(__dirname, 'public', 'index.html'));
+      });
     } else {
-      app.use(express.static('public'));
+      // Development mode - serve only the API endpoints
+      app.use(express.static(path.join(__dirname, 'public')));
+      app.get('/', (req, res) => {
+        res.sendFile(path.join(__dirname, 'public', 'index.html'));
+      });
     }
-    
+
     // Add basic health check endpoint
     app.get('/health', (req, res) => {
       res.status(200).json({ 
@@ -691,7 +701,7 @@ const auth = async (req, res, next) => {
         environment: process.env.NODE_ENV || 'development'
       });
     });
-    
+
     // =================== API ROUTES ===================
     
     // User Authentication Routes
@@ -1308,13 +1318,126 @@ const auth = async (req, res, next) => {
       }
     });
     
-    // Catch-all route for SPA in production
-    if (process.env.NODE_ENV === 'production') {
-      app.get('*', (req, res) => {
-        res.sendFile(path.join(__dirname, 'public', 'index.html'));
-      });
-    }
-    
+    // Download content as PDF
+    app.get('/api/content/:sessionId/download/pdf', async (req, res) => {
+      try {
+        const { sessionId } = req.params;
+        
+        if (!sessionId) {
+          return res.status(400).json({ error: 'Session ID is required' });
+        }
+        
+        const content = await Content.findOne({ sessionId });
+        
+        if (!content) {
+          return res.status(404).json({ error: 'Content not found' });
+        }
+        
+        // Create a PDF document
+        const doc = new PDFDocument();
+        
+        // Set response headers
+        res.setHeader('Content-Type', 'application/pdf');
+        res.setHeader('Content-Disposition', `attachment; filename=${content.title.replace(/\s+/g, '_')}.pdf`);
+        
+        // Pipe PDF to response
+        doc.pipe(res);
+        
+        // Add content to PDF
+        doc.fontSize(24).text(`${content.title}`, { align: 'center' });
+        doc.moveDown();
+        
+        // Summary section
+        doc.fontSize(18).text('Summary', { underline: true });
+        doc.fontSize(12).text(content.content.summary);
+        doc.moveDown(2);
+        
+        // Flashcards section
+        doc.fontSize(18).text('Flashcards', { underline: true });
+        doc.moveDown();
+        
+        content.content.flashcards.forEach((flashcard, index) => {
+          doc.fontSize(14).text(`Flashcard ${index + 1}`);
+          doc.fontSize(12).text(`Question: ${flashcard.question}`);
+          doc.fontSize(12).text(`Answer: ${flashcard.answer}`);
+          
+          if (flashcard.tags && flashcard.tags.length) {
+            doc.fontSize(10).text(`Tags: ${flashcard.tags.join(', ')}`);
+          }
+          
+          doc.moveDown();
+        });
+        
+        doc.moveDown();
+        
+        // Quiz section
+        doc.fontSize(18).text('Quiz Questions', { underline: true });
+        doc.moveDown();
+        
+        content.content.quizzes.forEach((quiz, index) => {
+          doc.fontSize(14).text(`Question ${index + 1}: ${quiz.question}`);
+          
+          quiz.options.forEach(option => {
+            doc.fontSize(12).text(`□ ${option}`);
+          });
+          
+          doc.fontSize(12).text(`Answer: ${quiz.answer}`);
+          
+          if (quiz.explanation) {
+            doc.fontSize(12).text(`Explanation: ${quiz.explanation}`);
+          }
+          
+          doc.moveDown();
+        });
+        
+        // Finalize the PDF
+        doc.end();
+      } catch (error) {
+        console.error('Error generating PDF:', error);
+        res.status(500).json({ error: error.message || 'Error generating PDF' });
+      }
+    });
+
+    // Download flashcards as CSV
+    app.get('/api/content/:sessionId/download/flashcards', async (req, res) => {
+      try {
+        const { sessionId } = req.params;
+        
+        if (!sessionId) {
+          return res.status(400).json({ error: 'Session ID is required' });
+        }
+        
+        const content = await Content.findOne({ sessionId });
+        
+        if (!content) {
+          return res.status(404).json({ error: 'Content not found' });
+        }
+        
+        // Set response headers
+        res.setHeader('Content-Type', 'text/csv');
+        res.setHeader('Content-Disposition', `attachment; filename=${content.title.replace(/\s+/g, '_')}_flashcards.csv`);
+        
+        // Create CSV content
+        let csvContent = 'Question,Answer,Tags\n';
+        
+        content.content.flashcards.forEach(flashcard => {
+          // Properly escape CSV fields
+          const question = `"${flashcard.question.replace(/"/g, '""')}"`;
+          const answer = `"${flashcard.answer.replace(/"/g, '""')}"`;
+          const tags = flashcard.tags && flashcard.tags.length 
+            ? `"${flashcard.tags.join(', ').replace(/"/g, '""')}"`
+            : '""';
+          
+          csvContent += `${question},${answer},${tags}\n`;
+        });
+        
+        res.send(csvContent);
+      } catch (error) {
+        console.error('Error generating CSV:', error);
+        res.status(500).json({ error: error.message || 'Error generating CSV' });
+      }
+    });
+
     // Start the server after all setup is complete
     app.listen(PORT, () => {
       console.log(`✅ Server running on port ${PORT} in ${process.env.NODE_ENV || 'development'} mode`);
@@ -1655,8 +1778,10 @@ function extractJSONFromString(str) {
 }
 
 // Generate flashcards endpoint
-app.post('/api/generate-flashcards', async (req, res) => {
+app.post('/api/generate-flashcards', express.json(), async (req, res) => {
   try {
+    console.log('📚 Flashcards generation request received', req.body);
+    
     const { sessionId } = req.body;
     
     if (!sessionId) {
@@ -1754,12 +1879,14 @@ app.post('/api/generate-flashcards', async (req, res) => {
     content.flashcards = flashcardsJson;
     await content.save();
     
+    console.log(`✅ Generated ${flashcardsJson.length} flashcards successfully`);
+    
     return res.status(200).json({ 
       message: 'Flashcards generated successfully',
       flashcards: flashcardsJson
     });
   } catch (error) {
-    console.error('Error generating flashcards:', error);
+    console.error('❌ Error generating flashcards:', error);
     return res.status(500).json({ 
       error: 'Failed to generate flashcards', 
       message: error.message
@@ -1768,8 +1895,10 @@ app.post('/api/generate-flashcards', async (req, res) => {
 });
 
 // Generate quiz endpoint
-app.post('/api/generate-quiz', async (req, res) => {
+app.post('/api/generate-quiz', express.json(), async (req, res) => {
   try {
+    console.log('🧠 Quiz generation request received', req.body);
+    
     const { sessionId } = req.body;
     
     if (!sessionId) {
@@ -1868,152 +1997,17 @@ app.post('/api/generate-quiz', async (req, res) => {
     content.quiz = quizJson;
     await content.save();
     
+    console.log(`✅ Generated ${quizJson.length} quiz questions successfully`);
+    
     return res.status(200).json({ 
       message: 'Quiz generated successfully',
       quiz: quizJson
     });
   } catch (error) {
-    console.error('Error generating quiz:', error);
+    console.error('❌ Error generating quiz:', error);
     return res.status(500).json({ 
       error: 'Failed to generate quiz', 
       message: error.message
     });
-  }
-});
-
-// Support for both production and development environments
-if (process.env.NODE_ENV === 'production') {
-  // Serve static files from the React app
-  app.use(express.static(path.join(__dirname, 'public')));
-  
-  // For any request that doesn't match one above, send back React's index.html file
-  app.get('*', (req, res) => {
-    res.sendFile(path.join(__dirname, 'public', 'index.html'));
-  });
-} else {
-  // Development mode - serve only the API endpoints
-  app.use(express.static(path.join(__dirname, 'public')));
-  app.get('/', (req, res) => {
-    res.sendFile(path.join(__dirname, 'public', 'index.html'));
-  });
-}
-
-// Download content as PDF
-app.get('/api/content/:sessionId/download/pdf', async (req, res) => {
-  try {
-    const { sessionId } = req.params;
-    
-    if (!sessionId) {
-      return res.status(400).json({ error: 'Session ID is required' });
-    }
-    
-    const content = await Content.findOne({ sessionId });
-    
-    if (!content) {
-      return res.status(404).json({ error: 'Content not found' });
-    }
-    
-    // Create a PDF document
-    const doc = new PDFDocument();
-    
-    // Set response headers
-    res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `attachment; filename=${content.title.replace(/\s+/g, '_')}.pdf`);
-    
-    // Pipe PDF to response
-    doc.pipe(res);
-    
-    // Add content to PDF
-    doc.fontSize(24).text(`${content.title}`, { align: 'center' });
-    doc.moveDown();
-    
-    // Summary section
-    doc.fontSize(18).text('Summary', { underline: true });
-    doc.fontSize(12).text(content.content.summary);
-    doc.moveDown(2);
-    
-    // Flashcards section
-    doc.fontSize(18).text('Flashcards', { underline: true });
-    doc.moveDown();
-    
-    content.content.flashcards.forEach((flashcard, index) => {
-      doc.fontSize(14).text(`Flashcard ${index + 1}`);
-      doc.fontSize(12).text(`Question: ${flashcard.question}`);
-      doc.fontSize(12).text(`Answer: ${flashcard.answer}`);
-      
-      if (flashcard.tags && flashcard.tags.length) {
-        doc.fontSize(10).text(`Tags: ${flashcard.tags.join(', ')}`);
-      }
-      
-      doc.moveDown();
-    });
-    
-    doc.moveDown();
-    
-    // Quiz section
-    doc.fontSize(18).text('Quiz Questions', { underline: true });
-    doc.moveDown();
-    
-    content.content.quizzes.forEach((quiz, index) => {
-      doc.fontSize(14).text(`Question ${index + 1}: ${quiz.question}`);
-      
-      quiz.options.forEach(option => {
-        doc.fontSize(12).text(`□ ${option}`);
-      });
-      
-      doc.fontSize(12).text(`Answer: ${quiz.answer}`);
-      
-      if (quiz.explanation) {
-        doc.fontSize(12).text(`Explanation: ${quiz.explanation}`);
-      }
-      
-      doc.moveDown();
-    });
-    
-    // Finalize the PDF
-    doc.end();
-  } catch (error) {
-    console.error('Error generating PDF:', error);
-    res.status(500).json({ error: error.message || 'Error generating PDF' });
-  }
-});
-
-// Download flashcards as CSV
-app.get('/api/content/:sessionId/download/flashcards', async (req, res) => {
-  try {
-    const { sessionId } = req.params;
-    
-    if (!sessionId) {
-      return res.status(400).json({ error: 'Session ID is required' });
-    }
-    
-    const content = await Content.findOne({ sessionId });
-    
-    if (!content) {
-      return res.status(404).json({ error: 'Content not found' });
-    }
-    
-    // Set response headers
-    res.setHeader('Content-Type', 'text/csv');
-    res.setHeader('Content-Disposition', `attachment; filename=${content.title.replace(/\s+/g, '_')}_flashcards.csv`);
-    
-    // Create CSV content
-    let csvContent = 'Question,Answer,Tags\n';
-    
-    content.content.flashcards.forEach(flashcard => {
-      // Properly escape CSV fields
-      const question = `"${flashcard.question.replace(/"/g, '""')}"`;
-      const answer = `"${flashcard.answer.replace(/"/g, '""')}"`;
-      const tags = flashcard.tags && flashcard.tags.length 
-        ? `"${flashcard.tags.join(', ').replace(/"/g, '""')}"`
-        : '""';
-      
-      csvContent += `${question},${answer},${tags}\n`;
-    });
-    
-    res.send(csvContent);
-  } catch (error) {
-    console.error('Error generating CSV:', error);
-    res.status(500).json({ error: error.message || 'Error generating CSV' });
   }
 });
