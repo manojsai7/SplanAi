@@ -21,229 +21,144 @@ const PDFDocument = require('pdfkit');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Validate and format MongoDB URI
-const getValidMongoDBURI = (uri) => {
-  if (!uri) {
-    console.error('MongoDB URI is not provided in environment variables');
-    return null;
-  }
-  
-  // Check if URI already has the correct format
-  if (uri.startsWith('mongodb://') || uri.startsWith('mongodb+srv://')) {
-    return uri;
-  }
-  
-  // If it's not in the correct format but looks like a MongoDB URI, add the prefix
-  if (uri.includes('@') && (uri.includes('.mongodb.net') || uri.includes('.mongo.cosmos'))) {
-    return `mongodb+srv://${uri}`;
-  }
-  
-  console.error('Invalid MongoDB URI format, unable to automatically correct');
-  return null;
-};
-
 // Enhanced MongoDB Atlas Connection
 const connectDB = async () => {
   try {
-    // Validate and fix MongoDB URI format
-    let uri = process.env.MONGODB_URI || '';
-    
-    // Make sure the URI has the proper protocol
-    if (!uri.startsWith('mongodb://') && !uri.startsWith('mongodb+srv://')) {
-      console.log('Adding MongoDB protocol prefix to URI');
-      uri = 'mongodb+srv://' + uri;
+    // 1. Get MongoDB URI from Heroku config
+    let uri = process.env.MONGODB_URI;
+    if (!uri) {
+      console.warn(" MONGODB_URI not set in environment variables");
+      return false;
+    }
+
+    // 2. Encode password (fixes special characters like @, /, etc.)
+    uri = uri.replace(/(mongodb\+srv:\/\/[^:]+):([^@]+)@/, (match, username, password) => {
+      const encodedPassword = encodeURIComponent(password);
+      console.log(` Password encoded for MongoDB connection`);
+      return `${username}:${encodedPassword}@`;
+    });
+
+    // 3. Add SSL/TLS options for Heroku if missing
+    if (!uri.includes("ssl=")) {
+      uri += (uri.includes("?") ? "&" : "?") + "ssl=true";
     }
     
-    // Check if we need to encode the password in the URI
-    const uriRegex = /^mongodb(\+srv)?:\/\/([^:]+):([^@]+)@(.+)$/;
-    const match = uri.match(uriRegex);
-    
-    if (match) {
-      // Extract parts of the connection string
-      const protocol = match[1] ? 'mongodb+srv://' : 'mongodb://';
-      const username = match[2];
-      let password = match[3];
-      const hostAndRest = match[4];
-      
-      // Check if password contains special characters that need encoding
-      if (password.includes('%') === false && 
-          (password.includes('@') || password.includes('/') || 
-           password.includes(':') || password.includes('#') || 
-           password.includes(' ') || password.includes('+'))) {
-        console.log('Password contains special characters, encoding it');
-        password = encodeURIComponent(password);
-      }
-      
-      // Rebuild the URI with encoded password
-      uri = `${protocol}${username}:${password}@${hostAndRest}`;
-      console.log('Using properly encoded MongoDB URI');
-      
-      // Append SSL parameters to the URI if not already present
-      if (!uri.includes('ssl=')) {
-        uri += (uri.includes('?') ? '&' : '?') + 'ssl=true';
-      }
-      
-      // Add TLS version specification
-      if (!uri.includes('tls=')) {
-        uri += '&tls=true';
-      }
-      
-      console.log('Added SSL/TLS parameters to URI');
+    if (!uri.includes("tls=")) {
+      uri += "&tls=true";
     }
     
-    // Use direct connection without Atlas proxy layer
-    const useDirectConnection = true;
-    console.log('Using direct connection:', useDirectConnection);
-    
-    // Configure Node.js TLS settings for MongoDB specifically
-    try {
-      // Set NODE_TLS_REJECT_UNAUTHORIZED temporarily to allow self-signed certificates
-      // This is not ideal for production but helps diagnose the connection issue
-      process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
-      console.log('Temporarily disabled TLS certificate validation');
-    } catch (tlsEnvError) {
-      console.warn('Could not set TLS environment variable:', tlsEnvError.message);
+    // Add retryWrites if not already in the URI
+    if (!uri.includes("retryWrites=")) {
+      uri += "&retryWrites=true";
     }
     
-    // Try connecting with multiple TLS versions
-    const connectWithTLSVersion = async (tlsVersion) => {
-      try {
-        console.log(`Attempting MongoDB connection with ${tlsVersion || 'default'} TLS settings...`);
-        
-        const options = {
-          useNewUrlParser: true,
-          useUnifiedTopology: true,
-          ssl: true,
-          sslValidate: false,
-          tlsAllowInvalidCertificates: true,
-          tlsAllowInvalidHostnames: true,
-          directConnection: useDirectConnection,
-          retryWrites: true,
-          w: 'majority',
-          serverSelectionTimeoutMS: 30000,
-          connectTimeoutMS: 30000
-        };
-        
-        // Add TLS version specific settings
-        if (tlsVersion === 'TLSv1.2') {
-          options.tls = true;
-          options.tlsCAFile = undefined; // Don't use a CA file
-          options.tlsCertificateKeyFile = undefined;
-          options.tlsInsecure = true; // Bypass certificate validation
-        } else if (tlsVersion === 'TLSv1.1') {
-          options.tls = true;
-          options.tlsInsecure = true;
-        } else if (tlsVersion === 'TLSv1.0') {
-          options.tls = true;
-          options.tlsInsecure = true;
-        }
-        
-        await mongoose.connect(uri, options);
-        console.log(`MongoDB Connected successfully using ${tlsVersion || 'default'} TLS settings`);
-        return true;
-      } catch (error) {
-        console.error(`Connection failed with ${tlsVersion || 'default'} TLS settings:`, error.message);
-        return false;
-      }
+    // Add maxPoolSize for better connection management
+    if (!uri.includes("maxPoolSize=")) {
+      uri += "&maxPoolSize=10";
+    }
+    
+    console.log(" Connecting to MongoDB Atlas...");
+
+    // 4. MongoDB Connection Options - carefully configured for Heroku + MongoDB Atlas
+    const options = {
+      useNewUrlParser: true,
+      useUnifiedTopology: true,
+      ssl: true,
+      tls: true,
+      tlsInsecure: process.env.NODE_ENV === 'production', // Only bypass in production (Heroku)
+      retryWrites: true,
+      w: "majority",
+      maxPoolSize: 10,
+      serverSelectionTimeoutMS: 30000,
+      connectTimeoutMS: 30000,
+      socketTimeoutMS: 45000
     };
+
+    // 5. Connect to MongoDB
+    await mongoose.connect(uri, options);
+    console.log(" MongoDB Connected Successfully!");
+    return true;
+  } catch (err) {
+    console.error(" MongoDB Connection Error:", err.message);
     
-    // Try different TLS versions in sequence
-    const tlsVersions = [null, 'TLSv1.2', 'TLSv1.1', 'TLSv1.0'];
-    let connected = false;
+    // Helpful error messages
+    if (err.message.includes("ENOTFOUND")) {
+      console.error(" DNS Error: Check your MongoDB URI hostname!");
+    } else if (err.message.includes("SSL") || err.message.includes("TLS")) {
+      console.error(" TLS/SSL Error: Try updating the connection string from MongoDB Atlas");
+      console.error("   Make sure to select Node.js driver and version 4.0 or later");
+    } else if (err.message.includes("whitelist")) {
+      console.error(" IP Whitelist Error: Add 0.0.0.0/0 to your MongoDB Atlas Network Access");
+    } 
     
-    for (const version of tlsVersions) {
-      connected = await connectWithTLSVersion(version);
-      if (connected) break;
-    }
-    
-    if (!connected) {
-      // Try one last approach: direct connection string modification
-      console.log('All TLS version attempts failed. Trying with modified connection string...');
+    // Still continue in production mode, so the app doesn't crash on Heroku
+    return false;
+  }
+};
+
+// Call connectDB but don't exit on failure
+const dbPromise = connectDB();
+
+// Session Configuration with proper MongoDB URI handling
+const sessionConfig = {
+  secret: process.env.SESSION_SECRET || 'fallback_session_secret',
+  resave: false,
+  saveUninitialized: false,
+  cookie: {
+    secure: process.env.NODE_ENV === 'production',
+    httpOnly: true,
+    maxAge: 7 * 24 * 60 * 60 * 1000 // 7 days
+  }
+};
+
+// Wait for database connection before starting server
+dbPromise.then(connected => {
+  // Set up MongoStore for session if MongoDB is connected
+  if (connected && process.env.MONGODB_URI) {
+    try {
+      // Get the encoded MongoDB URI
+      let uri = process.env.MONGODB_URI;
       
-      // Remove any existing tls or ssl parameters
-      let modifiedUri = uri.replace(/[?&]tls=(true|false)/gi, '')
-                           .replace(/[?&]ssl=(true|false)/gi, '');
-                           
-      // Add our custom parameters
-      modifiedUri += (modifiedUri.includes('?') ? '&' : '?') + 
-                     'ssl=true&tls=true&tlsInsecure=true&readPreference=primary&retryWrites=true&maxIdleTimeMS=120000';
+      // Encode password
+      uri = uri.replace(/(mongodb\+srv:\/\/[^:]+):([^@]+)@/, (match, username, password) => {
+        return `${username}:${encodeURIComponent(password)}@`;
+      });
       
-      try {
-        await mongoose.connect(modifiedUri, {
+      // Add SSL parameters if needed
+      if (!uri.includes("ssl=")) uri += (uri.includes("?") ? "&" : "?") + "ssl=true";
+      if (!uri.includes("tls=")) uri += "&tls=true";
+      
+      console.log(' Setting up MongoDB session store');
+      sessionConfig.store = MongoStore.create({
+        mongoUrl: uri,
+        ttl: 14 * 24 * 60 * 60, // 14 days
+        autoRemove: 'native',
+        touchAfter: 24 * 3600, // 24 hours
+        collectionName: 'sessions',
+        crypto: {
+          secret: process.env.SESSION_SECRET || 'fallback_session_secret'
+        },
+        mongoOptions: {
           useNewUrlParser: true,
           useUnifiedTopology: true,
           ssl: true,
           tls: true,
-          tlsInsecure: true,
-          directConnection: useDirectConnection,
-          serverSelectionTimeoutMS: 30000,
-          connectTimeoutMS: 30000
-        });
-        console.log('MongoDB Connected successfully with modified connection string');
-        connected = true;
-      } catch (finalError) {
-        console.error('Final connection attempt failed:', finalError.message);
-        throw finalError; // Rethrow to be caught by the outer catch
-      }
+          tlsInsecure: true
+        }
+      });
+    } catch (sessionErr) {
+      console.error(' Error initializing MongoStore:', sessionErr.message);
+      console.log(' Falling back to in-memory session store');
     }
-    
-    // Reset TLS environment variable to secure default
-    process.env.NODE_TLS_REJECT_UNAUTHORIZED = '1';
-    
-  } catch (err) {
-    console.error('Database Connection Error:', err);
-    
-    // Provide helpful diagnostics and guidance based on error type
-    if (err.name === 'MongooseServerSelectionError' || 
-        err.message?.includes('ENOTFOUND') ||
-        err.message?.includes('SSL') ||
-        err.message?.includes('TLS')) {
-      
-      console.error('\n===== MONGODB CONNECTION TROUBLESHOOTING =====');
-      
-      if (err.message?.includes('IP whitelist')) {
-        console.error('\nIP WHITELIST ISSUE: Your Heroku app IP is not whitelisted in MongoDB Atlas.');
-        console.error('To fix this:');
-        console.error('1. Go to your MongoDB Atlas dashboard');
-        console.error('2. Navigate to Network Access');
-        console.error('3. Add 0.0.0.0/0 to whitelist all IPs temporarily (change after testing)');
-        console.error('   OR add the specific Heroku IP ranges (see Heroku documentation)');
-      }
-      
-      if (err.message?.includes('SSL') || err.message?.includes('TLS') || err.message?.includes('certificate') ||
-          err.message?.includes('routines') || err.message?.includes('alert internal error')) {
-          
-        console.error('\nSSL/TLS ISSUE: There are problems with the secure connection to MongoDB.');
-        console.error('This appears to be a TLS version compatibility issue with Heroku and MongoDB Atlas.');
-        console.error('Try these fixes:');
-        console.error('1. In MongoDB Atlas, go to "Advanced Connection Options" and check "Use TLS/SSL" option');
-        console.error('2. Use a direct connection string from MongoDB Atlas under "Connect your application"');
-        console.error('3. Make sure to select "Node.js" and version "4.0 or later" when getting the connection string');
-        console.error('4. Try switching from mongodb+srv:// protocol to mongodb:// with full hostname list');
-      }
-      
-      console.error('\nMONGODB URI FORMAT:');
-      console.error('Your connection string should look like:');
-      console.error('mongodb+srv://<username>:<password>@<cluster>.mongodb.net/<dbname>?retryWrites=true&w=majority');
-      console.error('\nTry the helper tool: node heroku-env-helper.js to generate a properly formatted URI');
-      console.error('================================================\n');
-    }
-    
-    // Keep app running even if database connection fails in production
-    if (process.env.NODE_ENV !== 'production') {
-      console.error('Exiting due to database connection failure in development mode');
-      process.exit(1);
-    } else {
-      console.warn('Continuing without database connection in production mode');
-      console.warn('Your app will have limited functionality without database access');
-      console.warn('Try setting MONGODB_URI manually from the MongoDB Atlas dashboard');
-      console.warn('Run: heroku config:set MONGODB_URI="mongodb+srv://..."');
-    }
+  } else {
+    console.log(' Using in-memory session store (MongoDB not connected)');
   }
-};
-
-// Connect to MongoDB
-connectDB();
+  
+  // Start the server after DB connection attempt
+  app.listen(PORT, () => {
+    console.log(` Server running on port ${PORT} in ${process.env.NODE_ENV || 'development'} mode`);
+  });
+});
 
 // AI Clients Configuration
 let visionClient;
@@ -404,62 +319,6 @@ const openai = new OpenAI({
   timeout: 30000,
   maxRetries: 3
 });
-
-// Session Configuration with proper MongoDB URI handling
-const sessionConfig = {
-  secret: process.env.SESSION_SECRET || 'fallback_session_secret',
-  resave: false,
-  saveUninitialized: false,
-  cookie: {
-    secure: process.env.NODE_ENV === 'production',
-    httpOnly: true,
-    maxAge: 7 * 24 * 60 * 60 * 1000 // 7 days
-  }
-};
-
-// Use MongoStore for session storage if MongoDB URI is available
-if (process.env.MONGODB_URI) {
-  try {
-    // Process the MongoDB URI for session store (similar to connectDB)
-    let uri = process.env.MONGODB_URI;
-    
-    // Make sure the URI has the proper protocol
-    if (!uri.startsWith('mongodb://') && !uri.startsWith('mongodb+srv://')) {
-      uri = 'mongodb+srv://' + uri;
-    }
-    
-    // Encode password if needed
-    const uriRegex = /^mongodb(\+srv)?:\/\/([^:]+):([^@]+)@(.+)$/;
-    const match = uri.match(uriRegex);
-    
-    if (match) {
-      const protocol = match[1] ? 'mongodb+srv://' : 'mongodb://';
-      const username = match[2];
-      let password = match[3];
-      const hostAndRest = match[4];
-      
-      if (password.includes('%') === false && 
-          (password.includes('@') || password.includes('/') || 
-           password.includes(':') || password.includes('#') || 
-           password.includes(' ') || password.includes('+'))) {
-        password = encodeURIComponent(password);
-      }
-      
-      uri = `${protocol}${username}:${password}@${hostAndRest}`;
-    }
-    
-    console.log('Initializing MongoStore for session storage');
-    sessionConfig.store = MongoStore.create({
-      mongoUrl: uri,
-      ttl: 14 * 24 * 60 * 60, // 14 days
-      autoRemove: 'native',
-      touchAfter: 24 * 3600 // 24 hours
-    });
-  } catch (sessionErr) {
-    console.error('Error initializing MongoStore:', sessionErr.message);
-    console.log('Falling back to in-memory session store');
-  }
-}
 
 // Express App Configuration
 app.use(express.json()); // Support for JSON payloads
@@ -1186,8 +1045,3 @@ if (process.env.NODE_ENV === 'production') {
     res.sendFile(path.join(__dirname, 'public', 'index.html'));
   });
 }
-
-// Server Start with proper error handling
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`Server running on port ${PORT} in ${process.env.NODE_ENV || 'development'} mode`);
-});

@@ -1,1 +1,1 @@
-web: node server.js
+web: NODE_OPTIONS='--tls-min-v1.2' node server.js
