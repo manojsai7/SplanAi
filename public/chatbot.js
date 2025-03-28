@@ -249,18 +249,38 @@ document.addEventListener('DOMContentLoaded', function() {
             // Hide typing indicator
             hideTypingIndicator();
             
+            // Handle response with better error handling
+            let data;
+            try {
+                // Get response as text first
+                const responseText = await response.text();
+                
+                try {
+                    // Try to parse as JSON
+                    data = JSON.parse(responseText);
+                } catch (parseError) {
+                    console.error('JSON parsing error:', parseError);
+                    console.log('Raw response:', responseText);
+                    
+                    // Create fallback data
+                    data = {
+                        reply: "I'm having trouble processing your request. The server returned an invalid response."
+                    };
+                }
+            } catch (textError) {
+                console.error('Error reading response:', textError);
+                throw new Error('Failed to read server response');
+            }
+            
             if (!response.ok) {
-                const errorData = await response.json();
                 // Use the reply field from the error response if available
-                if (errorData && errorData.reply) {
-                    addBotMessage(errorData.reply);
+                if (data && data.reply) {
+                    addBotMessage(data.reply);
                 } else {
-                    throw new Error(errorData.message || errorData.error || 'Network response was not ok');
+                    throw new Error(data.message || data.error || 'Network response was not ok');
                 }
                 return;
             }
-            
-            const data = await response.json();
             
             // Display bot response - use the reply field which is now guaranteed to exist
             addBotMessage(data.reply || "I'm not sure how to respond to that.");

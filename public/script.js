@@ -296,25 +296,23 @@ document.addEventListener('DOMContentLoaded', function() {
       return;
     }
     
-    const file = fileInput.files[0];
-    const formData = new FormData();
-    formData.append('file', file);
-    
-    // Generate a session ID if not already set
-    if (!currentSessionId) {
-      currentSessionId = Date.now().toString() + Math.random().toString(36).substring(2, 8);
-    }
-    formData.append('sessionId', currentSessionId);
-    
-    // Add user ID if logged in
-    if (currentUser) {
-      formData.append('userId', currentUser.id);
-    }
-    
     try {
       showProcessing(true);
       
-      // Include auth token if available
+      // Generate a session ID if not already set
+      if (!currentSessionId) {
+        currentSessionId = Date.now().toString() + Math.random().toString(36).substring(2, 8);
+      }
+      const file = fileInput.files[0];
+      const formData = new FormData();
+      formData.append('file', file);
+      formData.append('sessionId', currentSessionId);
+      
+      // Add user ID if logged in
+      if (currentUser) {
+        formData.append('userId', currentUser.id);
+      }
+      
       const headers = {};
       const authToken = localStorage.getItem('authToken');
       if (authToken) {
@@ -1502,6 +1500,150 @@ document.addEventListener('DOMContentLoaded', function() {
     } catch (error) {
       console.error('Error deleting document:', error);
       showNotification(error.message || 'Error deleting document', 'error');
+    }
+  }
+  
+  // Generate Flashcards Button
+  const generateFlashcardsBtn = document.createElement('button');
+  generateFlashcardsBtn.className = 'primary-btn';
+  generateFlashcardsBtn.innerHTML = '<i class="fas fa-layer-group"></i> Generate Flashcards';
+  generateFlashcardsBtn.addEventListener('click', generateFlashcards);
+  
+  // Generate Quiz Button
+  const generateQuizBtn = document.createElement('button');
+  generateQuizBtn.className = 'primary-btn';
+  generateQuizBtn.innerHTML = '<i class="fas fa-question-circle"></i> Generate Quiz';
+  generateQuizBtn.addEventListener('click', generateQuiz);
+  
+  // Add buttons to the summary tab
+  if (summaryContent) {
+    const actionButtons = document.createElement('div');
+    actionButtons.className = 'action-buttons';
+    actionButtons.appendChild(generateFlashcardsBtn);
+    actionButtons.appendChild(generateQuizBtn);
+    
+    // Insert after summary content
+    summaryContent.parentNode.insertBefore(actionButtons, summaryContent.nextSibling);
+  }
+  
+  // Generate Flashcards Function
+  async function generateFlashcards() {
+    if (!currentSessionId) {
+      showNotification('Please upload a document or enter text first', 'error');
+      return;
+    }
+    
+    try {
+      showProcessing(true);
+      
+      // Call the API to generate flashcards
+      const response = await fetch('/api/generate-flashcards', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ sessionId: currentSessionId })
+      });
+      
+      // Handle response with better error handling
+      let data;
+      try {
+        // Get response as text first
+        const responseText = await response.text();
+        
+        try {
+          // Try to parse as JSON
+          data = JSON.parse(responseText);
+        } catch (parseError) {
+          console.error('JSON parsing error:', parseError);
+          console.log('Raw response:', responseText);
+          throw new Error('Failed to parse server response');
+        }
+      } catch (textError) {
+        console.error('Error reading response:', textError);
+        throw new Error('Failed to read server response');
+      }
+      
+      if (!response.ok) {
+        throw new Error(data.message || data.error || 'Failed to generate flashcards');
+      }
+      
+      // Update flashcards
+      flashcards = data.flashcards || [];
+      currentFlashcardIndex = 0;
+      updateFlashcardsUI();
+      
+      // Show notification
+      showNotification('Flashcards generated successfully!', 'success');
+      
+      // Switch to Flashcards tab
+      document.querySelector('[data-tab="flashcards-tab"]').click();
+    } catch (error) {
+      console.error('Error generating flashcards:', error);
+      showNotification(error.message || 'Error generating flashcards', 'error');
+    } finally {
+      showProcessing(false);
+    }
+  }
+  
+  // Generate Quiz Function
+  async function generateQuiz() {
+    if (!currentSessionId) {
+      showNotification('Please upload a document or enter text first', 'error');
+      return;
+    }
+    
+    try {
+      showProcessing(true);
+      
+      // Call the API to generate quiz
+      const response = await fetch('/api/generate-quiz', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ sessionId: currentSessionId })
+      });
+      
+      // Handle response with better error handling
+      let data;
+      try {
+        // Get response as text first
+        const responseText = await response.text();
+        
+        try {
+          // Try to parse as JSON
+          data = JSON.parse(responseText);
+        } catch (parseError) {
+          console.error('JSON parsing error:', parseError);
+          console.log('Raw response:', responseText);
+          throw new Error('Failed to parse server response');
+        }
+      } catch (textError) {
+        console.error('Error reading response:', textError);
+        throw new Error('Failed to read server response');
+      }
+      
+      if (!response.ok) {
+        throw new Error(data.message || data.error || 'Failed to generate quiz');
+      }
+      
+      // Update quiz
+      quizzes = data.quiz || [];
+      currentQuizIndex = 0;
+      correctAnswers = 0;
+      updateQuizUI();
+      
+      // Show notification
+      showNotification('Quiz generated successfully!', 'success');
+      
+      // Switch to Quiz tab
+      document.querySelector('[data-tab="quiz-tab"]').click();
+    } catch (error) {
+      console.error('Error generating quiz:', error);
+      showNotification(error.message || 'Error generating quiz', 'error');
+    } finally {
+      showProcessing(false);
     }
   }
 });
