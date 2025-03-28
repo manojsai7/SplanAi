@@ -648,7 +648,6 @@ textarea:focus {
 
 .flashcard-back .card-content,
 .flashcard-back .card-footer {
-  transform: rotateY(180deg); /* This prevents the text from appearing mirrored */
   width: 100%; /* Ensure full width */
 }
 
