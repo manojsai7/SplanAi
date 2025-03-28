@@ -300,6 +300,66 @@ function createMockVisionClient() {
   };
 }
 
+// Authentication middleware
+const auth = async (req, res, next) => {
+  try {
+    // First check if MongoDB is connected
+    if (mongoose.connection.readyState !== 1) {
+      console.warn('⚠️ Authentication attempted before MongoDB connection is ready');
+      // For APIs that require auth, fail with clear message
+      return res.status(503).json({ 
+        error: 'Database connection not ready',
+        message: 'The server database is currently connecting. Please try again in a moment.'
+      });
+    }
+    
+    // Check if user is authenticated via session
+    if (req.session?.userId) {
+      try {
+        const user = await User.findById(req.session.userId);
+        if (!user) {
+          return res.status(401).json({ error: 'Authentication required' });
+        }
+        req.user = user;
+        return next();
+      } catch (dbError) {
+        console.error('Database error during session auth:', dbError);
+        return res.status(500).json({ error: 'Internal server error during authentication' });
+      }
+    }
+    
+    // Check if user is authenticated via token
+    const token = req.header('Authorization')?.replace('Bearer ', '');
+    if (!token) {
+      return res.status(401).json({ error: 'Authentication required' });
+    }
+    
+    try {
+      const decoded = jwt.verify(token, process.env.JWT_SECRET || 'splanAI-jwt-secret');
+      
+      if (!decoded || !decoded.userId) {
+        return res.status(401).json({ error: 'Invalid authentication token' });
+      }
+      
+      const user = await User.findById(decoded.userId);
+      
+      if (!user) {
+        return res.status(401).json({ error: 'User not found' });
+      }
+      
+      req.user = user;
+      req.token = token;
+      next();
+    } catch (jwtError) {
+      console.error('JWT verification error:', jwtError);
+      res.status(401).json({ error: 'Invalid authentication token' });
+    }
+  } catch (error) {
+    console.error('Auth middleware error:', error);
+    res.status(500).json({ error: 'Internal server error during authentication' });
+  }
+};
+
 // IIFE to set up the database and models immediately
 (async () => {
   try {
@@ -420,66 +480,6 @@ function createMockVisionClient() {
       });
     });
     
-    // Authentication middleware
-    const auth = async (req, res, next) => {
-      try {
-        // First check if MongoDB is connected
-        if (mongoose.connection.readyState !== 1) {
-          console.warn('⚠️ Authentication attempted before MongoDB connection is ready');
-          // For APIs that require auth, fail with clear message
-          return res.status(503).json({ 
-            error: 'Database connection not ready',
-            message: 'The server database is currently connecting. Please try again in a moment.'
-          });
-        }
-        
-        // Check if user is authenticated via session
-        if (req.session?.userId) {
-          try {
-            const user = await User.findById(req.session.userId);
-            if (!user) {
-              return res.status(401).json({ error: 'Authentication required' });
-            }
-            req.user = user;
-            return next();
-          } catch (dbError) {
-            console.error('Database error during session auth:', dbError);
-            return res.status(500).json({ error: 'Internal server error during authentication' });
-          }
-        }
-        
-        // Check if user is authenticated via token
-        const token = req.header('Authorization')?.replace('Bearer ', '');
-        if (!token) {
-          return res.status(401).json({ error: 'Authentication required' });
-        }
-        
-        try {
-          const decoded = jwt.verify(token, process.env.JWT_SECRET || 'splanAI-jwt-secret');
-          
-          if (!decoded || !decoded.userId) {
-            return res.status(401).json({ error: 'Invalid authentication token' });
-          }
-          
-          const user = await User.findById(decoded.userId);
-          
-          if (!user) {
-            return res.status(401).json({ error: 'User not found' });
-          }
-          
-          req.user = user;
-          req.token = token;
-          next();
-        } catch (jwtError) {
-          console.error('JWT verification error:', jwtError);
-          res.status(401).json({ error: 'Invalid authentication token' });
-        }
-      } catch (error) {
-        console.error('Auth middleware error:', error);
-        res.status(500).json({ error: 'Internal server error during authentication' });
-      }
-    };
-
     // Start the server after all setup is complete
     app.listen(PORT, () => {
       console.log(` Server running on port ${PORT} in ${process.env.NODE_ENV || 'development'} mode`);
