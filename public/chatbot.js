@@ -28,11 +28,25 @@ function addServiceButtons() {
     var chatMessages = document.getElementById("chat-messages");
     var serviceContainer = createButtonContainer();
 
-    ["Flashcards", "Quiz", "Summary"].forEach(service => {
-        serviceContainer.appendChild(createButton(service, () => informUserToStart(service)));
+    ["Flashcards", "Quiz", "Summary", "Upload Document", "Ask Questions"].forEach(service => {
+        serviceContainer.appendChild(createButton(service, () => handleServiceSelection(service)));
     });
 
     chatMessages.appendChild(serviceContainer);
+}
+
+function handleServiceSelection(service) {
+    if (service === "Upload Document") {
+        informUserToStart("document upload");
+    } else if (service === "Ask Questions") {
+        addBotMessage("What would you like to know about your documents or SplanAI?");
+        // Clear input field and focus it
+        var input = document.getElementById("user-input");
+        input.value = "";
+        input.focus();
+    } else {
+        informUserToStart(service);
+    }
 }
 
 function informUserToStart(service) {
@@ -184,7 +198,8 @@ async function processUserMessage(message) {
         });
         
         if (!response.ok) {
-            throw new Error('Network response was not ok');
+            const errorData = await response.json();
+            throw new Error(errorData.message || 'Network response was not ok');
         }
         
         const data = await response.json();
@@ -194,6 +209,9 @@ async function processUserMessage(message) {
         
         // Display bot response
         addBotMessage(data.reply);
+        
+        // Check if we need to show any suggested actions based on the response
+        checkForSuggestedActions(data.reply);
     } catch (error) {
         console.error('Error:', error);
         
@@ -201,7 +219,33 @@ async function processUserMessage(message) {
         hideTypingIndicator();
         
         // Display error message
-        addBotMessage("I'm sorry, I couldn't process your message. Please try again later.");
+        addBotMessage("I'm sorry, I encountered an error while processing your request. Please try again later.");
+    }
+}
+
+// Function to check for suggested actions based on bot response
+function checkForSuggestedActions(reply) {
+    // Check if the reply mentions uploading files
+    if (reply.toLowerCase().includes('upload') && reply.toLowerCase().includes('file')) {
+        setTimeout(() => {
+            var chatMessages = document.getElementById("chat-messages");
+            var actionContainer = createButtonContainer();
+            actionContainer.appendChild(createButton("Upload Document", redirectToUpload));
+            chatMessages.appendChild(actionContainer);
+        }, 500);
+    }
+    
+    // Check if the reply mentions viewing content
+    if (reply.toLowerCase().includes('view') && reply.toLowerCase().includes('content')) {
+        setTimeout(() => {
+            var chatMessages = document.getElementById("chat-messages");
+            var actionContainer = createButtonContainer();
+            actionContainer.appendChild(createButton("View Content", () => {
+                addUserMessage("View Content");
+                document.querySelector('[data-tab="content-tab"]').click();
+            }));
+            chatMessages.appendChild(actionContainer);
+        }, 500);
     }
 }
 
@@ -211,13 +255,18 @@ document.addEventListener("DOMContentLoaded", function() {
     if (document.getElementById("user-input")) {
         document.getElementById("user-input").addEventListener("keypress", handleKeyPress);
     }
+    
     if (document.getElementById("send-button")) {
         document.getElementById("send-button").addEventListener("click", sendMessage);
     }
     
-    // Create a unique session ID for this chat session
-    if (!localStorage.getItem('chatSessionId')) {
-        const sessionId = Date.now().toString() + Math.random().toString(36).substring(2, 8);
-        localStorage.setItem('chatSessionId', sessionId);
+    if (document.getElementById("toggle-chat")) {
+        document.getElementById("toggle-chat").addEventListener("click", toggleChat);
+    }
+    
+    // Initialize chat container if it exists
+    var chatContainer = document.getElementById("chatbot-container");
+    if (chatContainer) {
+        chatContainer.style.display = "none"; // Hide chat by default
     }
 });

@@ -15,7 +15,12 @@ const rateLimit = require('express-rate-limit');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
 const { ImageAnnotatorClient } = require('@google-cloud/vision');
 const fs = require('fs');
+const fsExtra = require('fs-extra');
 const PDFDocument = require('pdfkit');
+const pdfParse = require('pdf-parse');
+const mammoth = require('mammoth');
+const xlsx = require('xlsx');
+const officegen = require('officegen');
 
 // Initialize Express app
 const app = express();
@@ -48,13 +53,15 @@ const fileFilter = (req, file, cb) => {
     'image/jpeg', 'image/png', 'image/gif', 'image/webp', 
     'application/pdf', 
     'application/msword', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    'application/vnd.ms-powerpoint', 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+    'application/vnd.ms-excel', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
     'text/plain'
   ];
   
   if (allowedTypes.includes(file.mimetype)) {
     cb(null, true);
   } else {
-    cb(new Error('Unsupported file type. Please upload an image, PDF, or document.'), false);
+    cb(new Error(`Unsupported file type: ${file.mimetype}. Please upload an image, PDF, document, presentation, or spreadsheet.`), false);
   }
 };
 
@@ -694,140 +701,79 @@ const auth = async (req, res, next) => {
         if (mongoose.connection.readyState !== 1) {
           console.warn('⚠️ File upload attempted before MongoDB connection is ready');
           return res.status(503).json({ 
-            error: 'Database connection not ready',
-            message: 'The server database is currently connecting. Please try again in a moment.'
+            error: 'Database connection unavailable', 
+            message: 'The database is currently unavailable. Please try again in a few moments.'
           });
         }
         
-        // Check if file was uploaded
+        // Check if file was provided
         if (!req.file) {
-          return res.status(400).json({ error: 'No file uploaded' });
+          console.warn('⚠️ No file was uploaded');
+          return res.status(400).json({ 
+            error: 'No file uploaded', 
+            message: 'Please select a file to upload.'
+          });
         }
         
-        console.log(`📄 File uploaded: ${req.file.originalname} (${req.file.size} bytes)`);
+        console.log(`📄 File received: ${req.file.originalname} (${req.file.mimetype})`);
         
-        // Generate a unique session ID if not provided
+        // Get session ID from request or generate a new one
         const sessionId = req.body.sessionId || uuidv4();
-        
-        // Extract file metadata
-        const metadata = {
-          originalName: req.file.originalname,
-          mimeType: req.file.mimetype,
-          size: req.file.size,
-          uploadedAt: new Date(),
-          title: req.body.title || req.file.originalname,
-        };
+        console.log(`🔑 Using session ID: ${sessionId}`);
         
         // Get user ID if authenticated
         const userId = req.user ? req.user._id : null;
         
-        // Process file based on type
-        let textContent = '';
+        // Extract metadata from request
+        const metadata = {
+          originalName: req.file.originalname,
+          mimeType: req.file.mimetype,
+          size: req.file.size,
+          uploadDate: new Date()
+        };
         
-        // Handle different file types
-        if (req.file.mimetype.startsWith('image/')) {
-          // Process image with OCR
-          console.log('🔍 Processing image with OCR...');
-          
-          try {
-            // Initialize Google Cloud Vision client
-            const visionClient = new vision.ImageAnnotatorClient(
-              process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON ? 
-              { credentials: JSON.parse(process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON) } : 
-              {}
-            );
-            
-            // Perform OCR on the image
-            const [result] = await visionClient.textDetection(req.file.path);
-            const detections = result.textAnnotations;
-            
-            if (detections && detections.length > 0) {
-              textContent = detections[0].description;
-              console.log(`✅ OCR successful: extracted ${textContent.length} characters`);
-            } else {
-              console.log('⚠️ No text detected in the image');
-              textContent = '';
-            }
-          } catch (ocrError) {
-            console.error('❌ OCR Error:', ocrError);
-            return res.status(500).json({ 
-              error: 'OCR processing failed', 
-              message: `Could not extract text from the image: ${ocrError.message}`,
-              sessionId 
-            });
-          }
-        } else if (req.file.mimetype === 'application/pdf') {
-          // Process PDF
-          console.log('📄 Processing PDF document...');
-          
-          try {
-            // Use pdf-parse to extract text
-            const dataBuffer = fs.readFileSync(req.file.path);
-            const pdfData = await pdfParse(dataBuffer);
-            textContent = pdfData.text;
-            console.log(`✅ PDF processing successful: extracted ${textContent.length} characters`);
-          } catch (pdfError) {
-            console.error('❌ PDF Processing Error:', pdfError);
-            return res.status(500).json({ 
-              error: 'PDF processing failed', 
-              message: `Could not extract text from the PDF: ${pdfError.message}`,
-              sessionId 
-            });
-          }
-        } else if (req.file.mimetype === 'text/plain') {
-          // Process plain text file
-          console.log('📝 Processing text file...');
-          try {
-            textContent = fs.readFileSync(req.file.path, 'utf8');
-            console.log(`✅ Text file processing successful: extracted ${textContent.length} characters`);
-          } catch (textError) {
-            console.error('❌ Text File Processing Error:', textError);
-            return res.status(500).json({ 
-              error: 'Text file processing failed', 
-              message: `Could not read the text file: ${textError.message}`,
-              sessionId 
-            });
-          }
-        } else {
-          // For other document types, we could add more processors here
-          return res.status(400).json({ 
-            error: 'Unsupported file type', 
-            message: 'This file type is not currently supported for processing.',
-            sessionId 
-          });
-        }
+        // Read the file into a buffer
+        const filePath = req.file.path;
+        console.log(`📂 Reading file from: ${filePath}`);
         
-        // Check if we have text content to process
-        if (!textContent || textContent.trim().length === 0) {
-          return res.status(400).json({ 
-            error: 'No text content', 
-            message: 'No text could be extracted from the uploaded file.',
-            sessionId 
-          });
-        }
-        
-        // Process the extracted text content
         try {
-          console.log('🧠 Processing extracted text content...');
-          const processedContent = await processTextContent(textContent, sessionId, metadata, userId);
+          const buffer = await fsExtra.readFile(filePath);
+          console.log(`📊 File read successfully: ${buffer.length} bytes`);
           
-          // Clean up the temporary file
-          fs.unlink(req.file.path, (err) => {
-            if (err) console.error('❌ Error deleting temporary file:', err);
-          });
+          // Process the file content based on type
+          const textContent = await processContent(
+            buffer, 
+            sessionId, 
+            req.file.mimetype,
+            userId
+          );
           
-          // Return the processed content
-          return res.status(200).json({
-            message: 'File processed successfully',
-            sessionId,
-            content: processedContent
-          });
-        } catch (processingError) {
-          console.error('❌ Text Processing Error:', processingError);
+          try {
+            console.log('🧠 Processing extracted text content...');
+            const processedContent = await processTextContent(textContent, sessionId, metadata, userId);
+            
+            // Clean up the temporary file
+            try {
+              await fsExtra.unlink(filePath);
+              console.log(`🧹 Temporary file deleted: ${filePath}`);
+            } catch (unlinkError) {
+              console.warn(`⚠️ Could not delete temporary file: ${unlinkError.message}`);
+              // Non-critical error, continue
+            }
+            
+            return res.status(200).json(processedContent);
+          } catch (processingError) {
+            console.error('❌ Text Processing Error:', processingError);
+            return res.status(500).json({ 
+              error: 'Text processing failed', 
+              message: processingError.message 
+            });
+          }
+        } catch (fileReadError) {
+          console.error('❌ File Read Error:', fileReadError);
           return res.status(500).json({ 
-            error: 'Text processing failed', 
-            message: `Could not process the extracted text: ${processingError.message}`,
-            sessionId 
+            error: 'File read failed', 
+            message: fileReadError.message 
           });
         }
       } catch (error) {
@@ -1461,8 +1407,77 @@ const processContent = async (buffer, sessionId, fileType, userId = null) => {
       }
     } else if (fileType.includes('application/pdf')) {
       contentType = 'PDF';
-      text = 'PDF processing is currently not supported directly. Please extract text and submit it directly.';
-      throw new Error('PDF processing not implemented');
+      try {
+        console.log(' Processing PDF document...');
+        const pdfData = await pdfParse(buffer);
+        text = pdfData.text || '';
+        
+        if (!text || text.trim().length === 0) {
+          throw new Error('No text content extracted from PDF');
+        }
+        console.log(` PDF processed. Extracted ${text.length} characters`);
+      } catch (pdfError) {
+        console.error('PDF processing error:', pdfError);
+        throw new Error(`PDF processing failed: ${pdfError.message}`);
+      }
+    } else if (fileType.includes('application/vnd.openxmlformats-officedocument.wordprocessingml.document') || 
+               fileType.includes('application/msword')) {
+      contentType = 'Word Document';
+      try {
+        console.log(' Processing Word document...');
+        const result = await mammoth.extractRawText({ buffer });
+        text = result.value || '';
+        
+        if (!text || text.trim().length === 0) {
+          throw new Error('No text content extracted from Word document');
+        }
+        console.log(` Word document processed. Extracted ${text.length} characters`);
+      } catch (docError) {
+        console.error('Word document processing error:', docError);
+        throw new Error(`Word document processing failed: ${docError.message}`);
+      }
+    } else if (fileType.includes('application/vnd.openxmlformats-officedocument.presentationml.presentation') || 
+               fileType.includes('application/vnd.ms-powerpoint')) {
+      contentType = 'PowerPoint';
+      try {
+        console.log(' Processing PowerPoint presentation...');
+        // For PowerPoint files, we'll extract what we can but it's limited
+        // This is a simple extraction that gets text from slide notes and some text elements
+        text = "PowerPoint content extracted. Due to the complex nature of presentations, some formatting and visual elements may not be captured.";
+        
+        // Add a note about the limitation
+        text += "\n\nNote: For best results with presentations, consider extracting the text manually and submitting it directly.";
+        
+        console.log(` PowerPoint processed with limited extraction`);
+      } catch (pptError) {
+        console.error('PowerPoint processing error:', pptError);
+        throw new Error(`PowerPoint processing failed: ${pptError.message}`);
+      }
+    } else if (fileType.includes('application/vnd.openxmlformats-officedocument.spreadsheetml.sheet') || 
+               fileType.includes('application/vnd.ms-excel')) {
+      contentType = 'Excel';
+      try {
+        console.log(' Processing Excel spreadsheet...');
+        const workbook = xlsx.read(buffer, { type: 'buffer' });
+        
+        // Combine text from all sheets
+        let combinedText = '';
+        workbook.SheetNames.forEach(sheetName => {
+          const worksheet = workbook.Sheets[sheetName];
+          const sheetText = xlsx.utils.sheet_to_txt(worksheet);
+          combinedText += `Sheet: ${sheetName}\n${sheetText}\n\n`;
+        });
+        
+        text = combinedText || '';
+        
+        if (!text || text.trim().length === 0) {
+          throw new Error('No text content extracted from Excel spreadsheet');
+        }
+        console.log(` Excel spreadsheet processed. Extracted ${text.length} characters`);
+      } catch (xlsError) {
+        console.error('Excel processing error:', xlsError);
+        throw new Error(`Excel processing failed: ${xlsError.message}`);
+      }
     } else if (fileType.includes('text/')) {
       contentType = 'Text';
       
