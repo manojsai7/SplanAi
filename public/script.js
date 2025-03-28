@@ -1580,6 +1580,7 @@ document.addEventListener('DOMContentLoaded', function() {
     
     try {
       showProcessing(true);
+      console.log('Generating flashcards for session:', currentSessionId);
       
       // Call the API to generate flashcards
       const response = await fetch('/api/generate-flashcards', {
@@ -1595,10 +1596,12 @@ document.addEventListener('DOMContentLoaded', function() {
       try {
         // Get response as text first
         const responseText = await response.text();
+        console.log('Flashcard generation response received');
         
         try {
           // Try to parse as JSON
           data = JSON.parse(responseText);
+          console.log('Flashcard data parsed successfully');
         } catch (parseError) {
           console.error('JSON parsing error:', parseError);
           console.log('Raw response:', responseText);
@@ -1614,15 +1617,21 @@ document.addEventListener('DOMContentLoaded', function() {
       }
       
       // Update flashcards
-      flashcards = data.flashcards || [];
-      currentFlashcardIndex = 0;
-      updateFlashcardsUI();
-      
-      // Show notification
-      showNotification('Flashcards generated successfully!', 'success');
-      
-      // Switch to Flashcards tab
-      document.querySelector('[data-tab="flashcards-tab"]').click();
+      if (data.flashcards && Array.isArray(data.flashcards)) {
+        console.log(`Received ${data.flashcards.length} flashcards`);
+        flashcards = data.flashcards;
+        currentFlashcardIndex = 0;
+        updateFlashcardsUI();
+        
+        // Show notification
+        showNotification('Flashcards generated successfully!', 'success');
+        
+        // Switch to Flashcards tab
+        document.querySelector('[data-tab="flashcards-tab"]').click();
+      } else {
+        console.error('Invalid flashcard data received:', data);
+        throw new Error('Invalid flashcard data received from server');
+      }
     } catch (error) {
       console.error('Error generating flashcards:', error);
       showNotification(error.message || 'Error generating flashcards', 'error');
@@ -1640,6 +1649,7 @@ document.addEventListener('DOMContentLoaded', function() {
     
     try {
       showProcessing(true);
+      console.log('Generating quiz for session:', currentSessionId);
       
       // Call the API to generate quiz
       const response = await fetch('/api/generate-quiz', {
@@ -1655,10 +1665,12 @@ document.addEventListener('DOMContentLoaded', function() {
       try {
         // Get response as text first
         const responseText = await response.text();
+        console.log('Quiz generation response received');
         
         try {
           // Try to parse as JSON
           data = JSON.parse(responseText);
+          console.log('Quiz data parsed successfully');
         } catch (parseError) {
           console.error('JSON parsing error:', parseError);
           console.log('Raw response:', responseText);
@@ -1674,16 +1686,22 @@ document.addEventListener('DOMContentLoaded', function() {
       }
       
       // Update quiz
-      quizzes = data.quiz || [];
-      currentQuizIndex = 0;
-      correctAnswers = 0;
-      updateQuizUI();
-      
-      // Show notification
-      showNotification('Quiz generated successfully!', 'success');
-      
-      // Switch to Quiz tab
-      document.querySelector('[data-tab="quiz-tab"]').click();
+      if (data.quiz && Array.isArray(data.quiz)) {
+        console.log(`Received ${data.quiz.length} quiz questions`);
+        quizzes = data.quiz;
+        currentQuizIndex = 0;
+        correctAnswers = 0;
+        updateQuizUI();
+        
+        // Show notification
+        showNotification('Quiz generated successfully!', 'success');
+        
+        // Switch to Quiz tab
+        document.querySelector('[data-tab="quiz-tab"]').click();
+      } else {
+        console.error('Invalid quiz data received:', data);
+        throw new Error('Invalid quiz data received from server');
+      }
     } catch (error) {
       console.error('Error generating quiz:', error);
       showNotification(error.message || 'Error generating quiz', 'error');
