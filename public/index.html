@@ -3,37 +3,359 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>StudyX 🚀</title>
-  <link rel="stylesheet" href="styles.css">
+  <title>SplanAI - Smart Study Assistant</title>
+  <link rel="stylesheet" href="style.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+  <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 </head>
 <body>
-  <div class="container">
-    <header>
-      <h1>StudyX</h1>
-      <button id="theme-toggle">🌙</button>
+  <div class="app-container">
+    <header class="app-header">
+      <div class="logo">
+        <span class="logo-icon">🧠</span>
+        <h1>SplanAI</h1>
+      </div>
+      <div class="header-controls">
+        <div id="user-profile" class="user-profile">
+          <button id="profile-button" class="profile-button">
+            <i class="fas fa-user-circle"></i>
+            <span id="username-display">Guest</span>
+            <i class="fas fa-chevron-down"></i>
+          </button>
+          <div id="profile-dropdown" class="profile-dropdown">
+            <div class="dropdown-header">
+              <p id="user-email">Not logged in</p>
+              <p id="account-type" class="account-type">Guest Account</p>
+            </div>
+            <div class="dropdown-divider"></div>
+            <a href="#" id="my-documents" class="dropdown-item">
+              <i class="fas fa-folder"></i>
+              <span>My Documents</span>
+            </a>
+            <a href="#" id="account-settings" class="dropdown-item">
+              <i class="fas fa-cog"></i>
+              <span>Account Settings</span>
+            </a>
+            <div class="dropdown-divider"></div>
+            <a href="#" id="login-button" class="dropdown-item">
+              <i class="fas fa-sign-in-alt"></i>
+              <span>Login</span>
+            </a>
+            <a href="#" id="logout-button" class="dropdown-item hidden">
+              <i class="fas fa-sign-out-alt"></i>
+              <span>Logout</span>
+            </a>
+          </div>
+        </div>
+        <button id="theme-toggle"><i class="fas fa-moon"></i></button>
+      </div>
     </header>
-    <main id="home" class="page active">
-      <div class="rocket">🚀</div>
-      <h2>Blast Off Your Studies!</h2>
-      <p>Upload your notes and let AI do the heavy lifting.</p>
-      <input type="file" id="file-input">
-      <button id="upload-btn">Launch!</button>
+
+    <div class="tab-navigation">
+      <button class="tab-btn active" data-tab="input-tab">Input Content</button>
+      <button class="tab-btn" data-tab="summary-tab">Summary</button>
+      <button class="tab-btn" data-tab="flashcards-tab">Flashcards</button>
+      <button class="tab-btn" data-tab="quiz-tab">Quiz</button>
+      <button class="tab-btn" data-tab="chat-tab">Chat Assistant</button>
+    </div>
+
+    <main class="app-content">
+      <!-- Input Tab - Upload Files or Enter Text -->
+      <section id="input-tab" class="tab-content active">
+        <div class="card">
+          <h2>Upload Document or Image</h2>
+          <p>Upload a PDF, image, or document to extract content for studying.</p>
+          
+          <div class="upload-container">
+            <div class="file-drop-area" id="drop-area">
+              <input type="file" id="file-input" accept=".pdf,.png,.jpg,.jpeg,.txt,.doc,.docx">
+              <div class="file-icon"><i class="fas fa-cloud-upload-alt"></i></div>
+              <p>Drag & drop files here or <span class="browse-files">browse files</span></p>
+              <p class="file-support-text">Supports: PDF, Images (JPG, PNG), Text (.txt)</p>
+            </div>
+            <div id="upload-preview" class="upload-preview hidden">
+              <div class="preview-content">
+                <span class="preview-icon"><i class="fas fa-file-alt"></i></span>
+                <span id="file-name" class="file-name">No file selected</span>
+              </div>
+              <button id="remove-file" class="remove-file">
+                <i class="fas fa-times"></i>
+              </button>
+            </div>
+            <button id="upload-btn" class="primary-btn">
+              <i class="fas fa-rocket"></i> Process Document
+            </button>
+          </div>
+        </div>
+
+        <div class="divider">
+          <span>OR</span>
+        </div>
+
+        <div class="card">
+          <h2>Enter Text Directly</h2>
+          <p>Paste or type your study content below.</p>
+          
+          <div class="text-input-container">
+            <div class="form-group">
+              <label for="content-title">Document Title (Optional)</label>
+              <input type="text" id="content-title" placeholder="Enter a title for your document">
+            </div>
+            <textarea id="direct-text-input" placeholder="Enter your text here..."></textarea>
+            <button id="process-text-btn" class="primary-btn">
+              <i class="fas fa-brain"></i> Generate Study Materials
+            </button>
+          </div>
+        </div>
+
+        <div id="processing-indicator" class="processing-indicator hidden">
+          <div class="spinner"></div>
+          <p>Processing your content...</p>
+        </div>
+      </section>
+
+      <!-- Summary Tab -->
+      <section id="summary-tab" class="tab-content">
+        <div class="card summary-card">
+          <div class="card-header">
+            <h2 id="document-title">Content Summary</h2>
+            <div class="card-actions">
+              <button id="download-pdf" class="icon-button" title="Download as PDF">
+                <i class="fas fa-file-pdf"></i>
+              </button>
+              <button id="share-content" class="icon-button" title="Share">
+                <i class="fas fa-share-alt"></i>
+              </button>
+              <button id="save-content" class="icon-button" title="Save to My Documents">
+                <i class="fas fa-save"></i>
+              </button>
+            </div>
+          </div>
+          <div id="summary-content" class="summary-content">
+            <p class="no-content-message">No content processed yet. Upload a document or enter text to see the summary.</p>
+          </div>
+        </div>
+      </section>
+
+      <!-- Flashcards Tab -->
+      <section id="flashcards-tab" class="tab-content">
+        <div class="card">
+          <div class="card-header">
+            <h2>Study Flashcards</h2>
+            <div class="card-actions">
+              <button id="download-flashcards" class="icon-button" title="Download Flashcards (CSV)">
+                <i class="fas fa-file-csv"></i>
+              </button>
+              <button id="print-flashcards" class="icon-button" title="Print Flashcards">
+                <i class="fas fa-print"></i>
+              </button>
+            </div>
+          </div>
+          <div class="controls">
+            <button id="prev-card" class="control-btn" disabled><i class="fas fa-chevron-left"></i></button>
+            <span id="card-counter">0/0</span>
+            <button id="next-card" class="control-btn" disabled><i class="fas fa-chevron-right"></i></button>
+          </div>
+          
+          <div id="flashcards-container" class="flashcards-container">
+            <div class="no-content-message">No flashcards available. Upload a document or enter text first.</div>
+            
+            <!-- Flashcard template (will be populated by JS) -->
+            <div class="flashcard-wrapper hidden" id="flashcard-template">
+              <div class="flashcard">
+                <div class="flashcard-inner">
+                  <div class="flashcard-front">
+                    <div class="card-content">
+                      <h3>Question</h3>
+                      <p class="card-text"></p>
+                    </div>
+                    <div class="card-footer">
+                      <button class="flip-btn">Show Answer</button>
+                    </div>
+                  </div>
+                  <div class="flashcard-back">
+                    <div class="card-content">
+                      <h3>Answer</h3>
+                      <p class="card-text"></p>
+                    </div>
+                    <div class="card-footer">
+                      <div class="tags-container"></div>
+                      <button class="flip-btn">Show Question</button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Quiz Tab -->
+      <section id="quiz-tab" class="tab-content">
+        <div class="card">
+          <div class="card-header">
+            <h2>Test Your Knowledge</h2>
+            <div class="card-actions">
+              <button id="print-quiz" class="icon-button" title="Print Quiz">
+                <i class="fas fa-print"></i>
+              </button>
+            </div>
+          </div>
+          <div id="quiz-container" class="quiz-container">
+            <div class="no-content-message">No quiz available. Upload a document or enter text first.</div>
+            
+            <!-- Quiz container (will be populated by JS) -->
+            <div id="quiz-content" class="quiz-content hidden">
+              <div class="quiz-header">
+                <h3 id="quiz-question"></h3>
+                <p id="quiz-progress">Question 1 of 3</p>
+              </div>
+              
+              <div class="quiz-options">
+                <!-- Options will be added dynamically -->
+              </div>
+              
+              <div class="quiz-feedback hidden">
+                <div class="feedback-icon">
+                  <i class="fas fa-check-circle correct-icon hidden"></i>
+                  <i class="fas fa-times-circle incorrect-icon hidden"></i>
+                </div>
+                <p id="quiz-explanation"></p>
+              </div>
+              
+              <div class="quiz-controls">
+                <button id="quiz-next" class="primary-btn" disabled>Next Question</button>
+                <button id="quiz-finish" class="primary-btn hidden">See Results</button>
+                <button id="quiz-restart" class="secondary-btn hidden">Restart Quiz</button>
+              </div>
+              
+              <div id="quiz-results" class="quiz-results hidden">
+                <h3>Quiz Results</h3>
+                <div class="results-stats">
+                  <div class="result-item">
+                    <span class="stat-label">Score:</span>
+                    <span id="quiz-score" class="stat-value">0/0</span>
+                  </div>
+                  <div class="result-item">
+                    <span class="stat-label">Percentage:</span>
+                    <span id="quiz-percentage" class="stat-value">0%</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Chat Assistant Tab -->
+      <section id="chat-tab" class="tab-content">
+        <div class="card chat-card">
+          <h2>Study Assistant Chat</h2>
+          <div id="chat-container" class="chat-container">
+            <div id="chat-messages" class="chat-messages">
+              <div class="chat-message bot">
+                <div class="message-avatar">🤖</div>
+                <div class="message-content">
+                  <p>Hello! I'm your study assistant. Ask me questions about the content you've uploaded.</p>
+                </div>
+              </div>
+            </div>
+            <div class="chat-input-container">
+              <input type="text" id="chat-input" placeholder="Ask a question about your study material...">
+              <button id="send-message" class="send-btn">
+                <i class="fas fa-paper-plane"></i>
+              </button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- My Documents Tab (Hidden by default, shown via JS) -->
+      <section id="documents-tab" class="tab-content">
+        <div class="card">
+          <h2>My Documents</h2>
+          <div id="documents-container" class="documents-container">
+            <div class="documents-list-header">
+              <div class="doc-column doc-title">Title</div>
+              <div class="doc-column doc-date">Date</div>
+              <div class="doc-column doc-type">Type</div>
+              <div class="doc-column doc-actions">Actions</div>
+            </div>
+            <div id="documents-list" class="documents-list">
+              <p class="no-content-message">You don't have any saved documents. Upload a document or enter text to get started.</p>
+              <!-- Document items will be added dynamically -->
+            </div>
+          </div>
+        </div>
+      </section>
     </main>
-    <main id="chat" class="page">
-      <div class="chat-window">
-        <div id="messages"></div>
-        <div class="actions">
-          <button id="flashcards-btn">Flashcards</button>
-          <button id="summary-btn">Summary</button>
-          <button id="quiz-btn">Quiz</button>
+
+    <footer class="app-footer">
+      <p>&copy; 2025 SplanAI - Your Smart Study Assistant</p>
+    </footer>
+  </div>
+
+  <!-- My Documents Modal (for non-authenticated users) -->
+  <div id="login-required-modal" class="modal">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3>Login Required</h3>
+        <button class="close-modal">&times;</button>
+      </div>
+      <div class="modal-body">
+        <p>You need to be logged in to access your documents.</p>
+        <div class="modal-actions">
+          <button id="go-to-login" class="primary-btn">Login</button>
+          <button class="secondary-btn close-modal">Cancel</button>
         </div>
       </div>
-    </main>
-    <nav>
-      <button data-page="home">Home</button>
-      <button data-page="chat">Chat</button>
-    </nav>
+    </div>
   </div>
+
+  <!-- Share Modal -->
+  <div id="share-modal" class="modal">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3>Share Document</h3>
+        <button class="close-modal">&times;</button>
+      </div>
+      <div class="modal-body">
+        <p>Share this document with others:</p>
+        <div class="share-url-container">
+          <input type="text" id="share-url" readonly>
+          <button id="copy-share-url" class="icon-button">
+            <i class="fas fa-copy"></i>
+          </button>
+        </div>
+        <div class="share-options">
+          <button class="share-option" data-platform="email">
+            <i class="fas fa-envelope"></i>
+            <span>Email</span>
+          </button>
+          <button class="share-option" data-platform="twitter">
+            <i class="fab fa-twitter"></i>
+            <span>Twitter</span>
+          </button>
+          <button class="share-option" data-platform="facebook">
+            <i class="fab fa-facebook"></i>
+            <span>Facebook</span>
+          </button>
+          <button class="share-option" data-platform="linkedin">
+            <i class="fab fa-linkedin"></i>
+            <span>LinkedIn</span>
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="notification" class="notification">
+    <div class="notification-content">
+      <i class="notification-icon"></i>
+      <span id="notification-message"></span>
+    </div>
+  </div>
+
   <script src="script.js"></script>
 </body>
 </html>
