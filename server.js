@@ -221,6 +221,18 @@ const ChatHistorySchema = new mongoose.Schema({
 // Initialize models only after successful connection
 let User, Content, ChatHistory;
 
+// Define sessionConfig at the global scope before it's used
+const sessionConfig = {
+  secret: process.env.SESSION_SECRET || 'fallback_session_secret',
+  resave: false,
+  saveUninitialized: false,
+  cookie: {
+    secure: process.env.NODE_ENV === 'production',
+    httpOnly: true,
+    maxAge: 7 * 24 * 60 * 60 * 1000 // 7 days
+  }
+};
+
 // Wait for mongoose connection before initializing models
 dbPromise.then(connected => {
   if (connected) {
@@ -238,19 +250,7 @@ dbPromise.then(connected => {
     ChatHistory = mongoose.model('ChatHistory', ChatHistorySchema);
   }
 
-  // Session Configuration with proper MongoDB URI handling
-  const sessionConfig = {
-    secret: process.env.SESSION_SECRET || 'fallback_session_secret',
-    resave: false,
-    saveUninitialized: false,
-    cookie: {
-      secure: process.env.NODE_ENV === 'production',
-      httpOnly: true,
-      maxAge: 7 * 24 * 60 * 60 * 1000 // 7 days
-    }
-  };
-
-  // Wait for database connection before starting server
+  // Update session store if MongoDB is connected
   if (connected && process.env.MONGODB_URI) {
     try {
       // Get the encoded MongoDB URI
@@ -290,6 +290,9 @@ dbPromise.then(connected => {
   } else {
     console.log(' Using in-memory session store (MongoDB not connected)');
   }
+  
+  // Apply session middleware after store is configured
+  app.use(session(sessionConfig));
   
   // Start the server after DB connection attempt
   app.listen(PORT, () => {
@@ -713,9 +716,6 @@ app.use(rateLimit({
   windowMs: 15 * 60 * 1000, // Limit each IP to 100 requests per windowMs
   max: 100
 }));
-
-// Session configuration
-app.use(session(sessionConfig));
 
 // =================== API Endpoints ===================
 
