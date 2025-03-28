@@ -17,10 +17,36 @@ const session = require('express-session');
 const MongoStore = require('connect-mongo');
 const PDFDocument = require('pdfkit');
 
+// Validate and format MongoDB URI
+const getValidMongoDBURI = (uri) => {
+  if (!uri) {
+    console.error('MongoDB URI is not provided in environment variables');
+    return null;
+  }
+  
+  // Check if URI already has the correct format
+  if (uri.startsWith('mongodb://') || uri.startsWith('mongodb+srv://')) {
+    return uri;
+  }
+  
+  // Try to format the URI if it's missing the protocol
+  if (uri.includes('@') && (uri.includes('.mongodb.net') || uri.includes('.mongo.cosmos'))) {
+    return `mongodb+srv://${uri}`;
+  }
+  
+  console.error('Invalid MongoDB URI format, unable to automatically correct');
+  return null;
+};
+
 // Enhanced MongoDB Atlas Connection
 const connectDB = async () => {
   try {
-    await mongoose.connect(process.env.MONGODB_URI, {
+    const mongoUri = getValidMongoDBURI(process.env.MONGODB_URI);
+    if (!mongoUri) {
+      throw new Error('Invalid MongoDB URI. Please check your environment variables.');
+    }
+    
+    await mongoose.connect(mongoUri, {
       useNewUrlParser: true,
       useUnifiedTopology: true,
       retryWrites: true,
@@ -105,7 +131,7 @@ app.use(session({
   resave: false,
   saveUninitialized: false,
   store: MongoStore.create({
-    mongoUrl: process.env.MONGODB_URI,
+    mongoUrl: getValidMongoDBURI(process.env.MONGODB_URI),
     collectionName: 'sessions'
   }),
   cookie: {
